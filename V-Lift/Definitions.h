@@ -21,7 +21,7 @@ Author:		David Carrel
 
 // How many pods are being controlled
 #define NUM_PODS 2
-#define DAVE_FORCE_POD_NUM 2
+//#define DAVE_FORCE_POD_NUM 1
 
 /*************************************************
  * XIAO ESP32C6 Pin map
@@ -45,6 +45,8 @@ Author:		David Carrel
 #define DOWN_BUTTON_PIN	D9
 #define UP_LED_PIN	D3
 #define DOWN_LED_PIN	D6
+
+#define USE_BUTTON_INTERRUPTS
 
 // Set your battery MAX/MIN voltage corresponding to 100% and 0%
 // For 2 12V AGM batteries in series, nominal values are 24 and 23

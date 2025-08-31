@@ -44,11 +44,14 @@ wifi_power_t wifiPower = WIFI_POWER_11dBm; // Will bump to max before setting
 
 // MQTT parameters
 PubSubClient _mqtt(_wifi);
-
-// I want to declare this once at a modular level, keep the heap somewhere in check.
 char* _mqttPayload = NULL;
-
 bool resendAllData = false;
+
+#ifdef USE_BUTTON_INTERRUPTS
+volatile boolean configButtonPressed = false;
+volatile boolean upButtonChanged = false;
+volatile boolean downButtonChanged = false;
+#endif // USE_BUTTON_INTERRUPTS
 
 #ifdef USE_DISPLAY
 // OLED variables
@@ -135,6 +138,9 @@ void setup()
 
 	pinMode(LED_BUILTIN, OUTPUT);		// Configure LED for output
 	pinMode(CONFIG_BUTTON_PIN, INPUT);	// Configure the user push button
+#ifdef USE_BUTTON_INTERRUPTS
+	attachInterrupt(CONFIG_BUTTON_PIN, configButtonISR, FALLING);
+#endif // USE_BUTTON_INTERRUPTS
 
 	// Wire.setClock(10000);
 
@@ -143,8 +149,7 @@ void setup()
 	_display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS);  // initialize OLED
 	_display.clearDisplay();
 	_display.display();
-// DAVE
-	updateOLED(false, myUniqueId, "No sleep", _version);
+	updateOLED(false, myUniqueId, "Starting...", _version);
 #endif // USE_DISPLAY
 
 #ifdef DEBUG_OVER_SERIAL
@@ -167,24 +172,29 @@ void setup()
 	preferences.end();
 
 	if ((config.podNumber < 1) || (config.podNumber > NUM_PODS)) {
-		// Specify pod number using buttons.
 		int podNum;
 #ifdef DAVE_FORCE_POD_NUM
 		podNum = DAVE_FORCE_POD_NUM;
 #else // DAVE_FORCE_POD_NUM
-		// DAVE - write to display
-		// DAVE - flash DoWN button to indicate pod number
-		// If UP button pressed, increase podNum (and wrap)
-		// If DOWN button pressed, store podNum and exit
+		podNum = getPodNumFromButton();
 #endif // DAVE_FORCE_POD_NUM
 		myPod.podNum = podNum;
 		preferences.begin(DEVICE_NAME, false); // RW
 		preferences.putInt(PREF_NAME_POD_NUM, podNum);
 		preferences.end();
+	} else {
+		myPod.podNum = config.podNumber;
 	}
 
 	// If config is not setup, then enter config mode
 	if (myPod.podNum == 1) {
+		uint8_t mac[6];
+		// Set our unique identity.
+		WiFi.mode(WIFI_STA); // Kick WiFi just enough so MAC is readable
+		WiFi.macAddress(mac);
+		snprintf(myUniqueId, sizeof(myUniqueId), DEVICE_NAME "-%0X%02X%02X", mac[3] & 0xf, mac[4], mac[5]);
+		snprintf(statusTopic, sizeof(statusTopic), DEVICE_NAME "/%s/status", myUniqueId);
+
 		if ((config.wifiSSID == "") ||
 		    (config.wifiPass == "") ||
 		    (config.mqttSrvr == "") ||
@@ -194,6 +204,8 @@ void setup()
 			configLoop();
 			ESP.restart();
 		}
+	} else {
+		snprintf(myUniqueId, sizeof(myUniqueId), DEVICE_NAME "-pod%d", myPod.podNum);
 	}
 #ifdef USE_DISPLAY
 	{
@@ -210,13 +222,13 @@ void setup()
 	pinMode(UP_RELAY_PIN, OUTPUT);		// Configure pin for controlling relay
 	pinMode(DOWN_RELAY_PIN, OUTPUT);	// Configure pin for controlling relay
 
-	if (myPod.podNum != 1) {
-		snprintf(myUniqueId, sizeof(myUniqueId), DEVICE_NAME "-pod%d", myPod.podNum);
-	} else {
-		uint8_t mac[6];
-
+	if (myPod.podNum == 1) {
 		pinMode(UP_BUTTON_PIN, INPUT_PULLUP);
 		pinMode(DOWN_BUTTON_PIN, INPUT_PULLUP);
+#ifdef USE_BUTTON_INTERRUPTS
+		attachInterrupt(UP_BUTTON_PIN, upButtonISR, CHANGE);
+		attachInterrupt(DOWN_BUTTON_PIN, downButtonISR, CHANGE);
+#endif // USE_BUTTON_INTERRUPTS
 		pinMode(UP_LED_PIN, OUTPUT);
 		pinMode(DOWN_LED_PIN, OUTPUT);
 #ifdef MP_XIAO_ESP32C6
@@ -225,12 +237,6 @@ void setup()
 		pinMode(WIFI_ANT_CONFIG, OUTPUT);
 		digitalWrite(WIFI_ANT_CONFIG, config.extAntenna ? HIGH : LOW);
 #endif // MP_XIAO_ESP32C6
-
-		// Set our unique identity.
-		WiFi.mode(WIFI_STA); // Kick WiFi just enough so MAC is readable
-		WiFi.macAddress(mac);
-		snprintf(myUniqueId, sizeof(myUniqueId), DEVICE_NAME "-%0X%02X%02X", mac[3] & 0xf, mac[4], mac[5]);
-		snprintf(statusTopic, sizeof(statusTopic), DEVICE_NAME "/%s/status", myUniqueId);
 
 		// Configure WIFI
 		checkWifiStatus(true);
@@ -262,6 +268,46 @@ void setup()
 #endif // USE_DISPLAY
 }
 
+int
+getPodNumFromButton (void)
+{
+	int podNum = 1;
+
+	for (;;) {
+		updateOLED(false, "Press button", "to start", "setting pod num.");
+#ifdef USE_BUTTON_INTERRUPTS
+		if (configButtonPressed) {
+			configButtonPressed = false;
+			break;
+		}
+#else // USE_BUTTON_INTERRUPTS
+#error Not hanndled
+#endif // USE_BUTTON_INTERRUPTS
+		delay(500);
+	}
+#define POD_NUM_SEC 15
+	for (int sec = POD_NUM_SEC; sec > 0; sec--) {
+		char line3[OLED_CHARACTER_WIDTH], line4[OLED_CHARACTER_WIDTH];
+		snprintf(line3, sizeof(line3), "        %d", podNum);
+		snprintf(line4, sizeof(line4), "Saving in %d seconds", sec);
+		updateOLED(false, "** Set Pod number **", line3, line4);
+#ifdef USE_BUTTON_INTERRUPTS
+		if (configButtonPressed) {
+			configButtonPressed = false;
+			podNum++;
+			if (podNum > NUM_PODS) {
+				podNum = 1;
+			}
+			sec = POD_NUM_SEC;
+		}
+#else // USE_BUTTON_INTERRUPTS
+#error Not hanndled
+#endif // USE_BUTTON_INTERRUPTS
+		delay(1000);
+	}
+	return podNum;
+}
+
 void
 configLoop(void)
 {
@@ -291,9 +337,16 @@ configLoop(void)
 		}
 
 		// Read button state
+#ifdef USE_BUTTON_INTERRUPTS
+		if (configButtonPressed) {
+			configButtonPressed = false;
+			break;
+		}
+#else // USE_BUTTON_INTERRUPTS
 		if (digitalRead(CONFIG_BUTTON_PIN) == LOW) {
 			break;
 		}
+#endif // USE_BUTTON_INTERRUPTS
 
 		delay(30);
 	}
@@ -395,9 +448,16 @@ loop()
 	boolean mqttIsOn = false;
 
 	// Read button state
+#ifdef USE_BUTTON_INTERRUPTS
+	if (configButtonPressed) {
+		configButtonPressed = false;
+		configHandler();
+	}
+#else // USE_BUTTON_INTERRUPTS
 	if (digitalRead(CONFIG_BUTTON_PIN) == LOW) {
 		configHandler();
 	}
+#endif // USE_BUTTON_INTERRUPTS
 
 	if (myPod.podNum == 1) {
 		// Make sure WiFi is good
@@ -557,18 +617,58 @@ void
 readModeFromButtons(void)
 {
 	boolean upPress = false, downPress = false;
-#ifdef USE_LONG_PRESSES
 	boolean upLongPress = false, downLongPress = false;
-	uint32_t now;
 	static uint32_t upPressLastTime = 0, downPressLastTime = 0;
 
 #define LONG_PRESS_TIME 3000    // 3 seconds
-#endif // USE_LONG_PRESSES
 
+#ifdef USE_BUTTON_INTERRUPTS
+	if (upButtonChanged) {
+		noInterrupts();   // Atomically read and reset the flag
+		boolean pressed = (digitalRead(UP_BUTTON_PIN) == LOW);
+		boolean changed = upButtonChanged;
+		upButtonChanged = false;
+		interrupts();
+
+		if (changed) {
+			if (!pressed) { // Button released
+				unsigned long pressDuration = millis() - upPressLastTime;
+				if (upPressLastTime && (pressDuration >= LONG_PRESS_TIME)) {
+					upLongPress = true;
+				} else {
+					upPress = true;
+				}
+				upPressLastTime = 0;
+			} else { // Button pressed
+				upPressLastTime = millis();
+			}
+		}
+	}
+	if (downButtonChanged) {
+		noInterrupts();   // Atomically read and reset the flag
+		boolean pressed = (digitalRead(DOWN_BUTTON_PIN) == LOW);
+		boolean changed = downButtonChanged;
+		downButtonChanged = false;
+		interrupts();
+
+		if (changed) {
+			if (!pressed) { // Button released
+				unsigned long pressDuration = millis() - downPressLastTime;
+				if (downPressLastTime && (pressDuration >= LONG_PRESS_TIME)) {
+					downLongPress = true;
+				} else {
+					downPress = true;
+				}
+				downPressLastTime = 0;
+			} else { // Button pressed
+				downPressLastTime = millis();
+			}
+		}
+	}
+#else // USE_BUTTON_INTERRUPTS
 	if (digitalRead(UP_BUTTON_PIN) == LOW) {
 		upPress = true;
-#ifdef USE_LONG_PRESSES
-		now = millis();
+		uint32_t now = millis();
 		if (upPressLastTime) {
 			if ((upPressLastTime + LONG_PRESS_TIME) > now) {
 				upLongPress = true;
@@ -578,13 +678,11 @@ readModeFromButtons(void)
 		}
 	} else {
 		upPressLastTime = 0;
-#endif // USE_LONG_PRESSES
 	}
 
 	if (digitalRead(DOWN_BUTTON_PIN) == LOW) {
 		downPress = true;
-#ifdef USE_LONG_PRESSES
-		now = millis();
+		uint32_t now = millis();
 		if (downPressLastTime) {
 			if ((downPressLastTime + LONG_PRESS_TIME) > now) {
 				downLongPress = true;
@@ -594,8 +692,8 @@ readModeFromButtons(void)
 		}
 	} else {
 		downPressLastTime = 0;
-#endif // USE_LONG_PRESSES
 	}
+#endif // USE_BUTTON_INTERRUPTS
 
 	if (upPress) {
 		if (myPod.action == actionRaise) {
@@ -913,7 +1011,7 @@ updateOLED(bool justStatus, const char* line2, const char* line3, const char* li
 #endif // USE_ZIGBEE
 		wifiStatus = WiFi.status() == WL_CONNECTED ? 'W' : ' ';
 		mqttStatus = _mqtt.connected() && _mqtt.loop() ? 'M' : ' ';
-		snprintf(line1, sizeof(line1), "DS   %c%c%c%c        %3hhd",
+		snprintf(line1, sizeof(line1), "Lift %c%c%c%c        %3hhd",
 			 _oledOperatingIndicator, wifiStatus, mqttStatus, zigbeeStatus, rssi);
 	}
 	_display.println(line1);
@@ -1737,6 +1835,26 @@ void emptyPayload()
 {
 	_mqttPayload[0] = '\0';
 }
+
+#ifdef USE_BUTTON_INTERRUPTS
+void
+configButtonISR(void)
+{
+	configButtonPressed = true;
+}
+
+void
+upButtonISR(void)
+{
+	upButtonChanged = true;
+}
+
+void
+downButtonISR(void)
+{
+	downButtonChanged = true;
+}
+#endif // USE_BUTTON_INTERRUPTS
 
 #ifdef DEBUG_FREEMEM
 uint32_t freeMemory()
