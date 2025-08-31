@@ -32,7 +32,7 @@ Author:		David Carrel
 void setButtonLEDs(boolean isInit = false);
 
 // Device parameters
-char _version[6] = "v1.01";
+char _version[6] = "v1.03";
 char myUniqueId[17];
 char statusTopic[128];
 
@@ -281,16 +281,13 @@ getPodNumFromButton (void)
 			break;
 		}
 #else // USE_BUTTON_INTERRUPTS
-#error Not hanndled
+#error Not handled
 #endif // USE_BUTTON_INTERRUPTS
 		delay(500);
 	}
 #define POD_NUM_SEC 15
 	for (int sec = POD_NUM_SEC; sec > 0; sec--) {
 		char line3[OLED_CHARACTER_WIDTH], line4[OLED_CHARACTER_WIDTH];
-		snprintf(line3, sizeof(line3), "        %d", podNum);
-		snprintf(line4, sizeof(line4), "Saving in %d seconds", sec);
-		updateOLED(false, "** Set Pod number **", line3, line4);
 #ifdef USE_BUTTON_INTERRUPTS
 		if (configButtonPressed) {
 			configButtonPressed = false;
@@ -301,8 +298,11 @@ getPodNumFromButton (void)
 			sec = POD_NUM_SEC;
 		}
 #else // USE_BUTTON_INTERRUPTS
-#error Not hanndled
+#error Not handled
 #endif // USE_BUTTON_INTERRUPTS
+		snprintf(line3, sizeof(line3), "        %d", podNum);
+		snprintf(line4, sizeof(line4), "Saving in %d seconds", sec);
+		updateOLED(false, "** Set Pod number **", line3, line4);
 		delay(1000);
 	}
 	return podNum;
@@ -450,13 +450,21 @@ loop()
 	// Read button state
 #ifdef USE_BUTTON_INTERRUPTS
 	if (configButtonPressed) {
+		Preferences preferences;
+		int podNum;
 		configButtonPressed = false;
-		configHandler();
+		podNum = getPodNumFromButton();
+		myPod.podNum = podNum;
+		preferences.begin(DEVICE_NAME, false); // RW
+		preferences.putInt(PREF_NAME_POD_NUM, podNum);
+		preferences.end();
+		if (podNum == 1) {
+			configHandler();
+		}
+		ESP.restart();
 	}
 #else // USE_BUTTON_INTERRUPTS
-	if (digitalRead(CONFIG_BUTTON_PIN) == LOW) {
-		configHandler();
-	}
+#error Not handled
 #endif // USE_BUTTON_INTERRUPTS
 
 	if (myPod.podNum == 1) {
