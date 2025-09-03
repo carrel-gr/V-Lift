@@ -29,10 +29,10 @@ Author:		David Carrel
 #endif // USE_DISPLAY
 
 #define popcount __builtin_popcount
-void setButtonLEDs(boolean isInit = false);
+void setButtonLEDs(int freq = 0);
 
 // Device parameters
-char _version[6] = "v1.03";
+char _version[6] = "v1.04";
 char myUniqueId[17];
 char statusTopic[128];
 
@@ -264,8 +264,15 @@ void setup()
 	myPod.action = actionStop;	// and stop until loop reads position
 
 #ifdef USE_DISPLAY
-	updateOLED(false, myUniqueId, "Up  :  Stop", _version);
+	updateOLED(false, myUniqueId, "setup complete", _version);
 #endif // USE_DISPLAY
+	for (int i = 0; i < 10; i++) {
+		flashBuiltinLed(500);
+		if (myPod.podNum == 1) {
+			setButtonLEDs(500);
+		}
+		delay(500);
+	}
 }
 
 int
@@ -333,7 +340,7 @@ configLoop(void)
 #endif // USE_DISPLAY
 		flashBuiltinLed(250);
 		if (myPod.podNum == 1) {
-			setButtonLEDs(true);
+			setButtonLEDs(250);
 		}
 
 		// Read button state
@@ -539,18 +546,19 @@ loop()
 #endif // USE_DISPLAY
 }
 
+// freq defaults to 0
 void
-setButtonLEDs (boolean isInit)
+setButtonLEDs (int freq)
 {
 	static unsigned long lastLed = 0;
-	static boolean toggle;
+	static boolean toggle = false;
 
-#define LED_ON  LOW
-#define LED_OFF HIGH
+#define LED_ON  HIGH
+#define LED_OFF LOW
 
-	if (isInit) {
+	if (freq) {
 		// if INIT, then fast alternate
-		if (checkTimer(&lastLed, 500)) {
+		if (checkTimer(&lastLed, freq)) {
 			digitalWrite(UP_LED_PIN, toggle ? LED_ON : LED_OFF);
 			digitalWrite(DOWN_LED_PIN, toggle ? LED_OFF : LED_ON);
 			toggle = !toggle;
@@ -596,6 +604,9 @@ setPodAction (void)
 		case positionDown:
 			myPod.action = (myPod.mode == modeUp) ? actionRaise : actionStop;
 			break;
+		default:  // Shouldn't happen.
+			myPod.action = actionStop;
+			break;
 		}
 	}
 
@@ -612,7 +623,7 @@ setPodAction (void)
 		digitalWrite(DOWN_RELAY_PIN, RELAY_ON);
 		break;
 	case actionStop:
-	default:
+	default:  // Shouldn't happen.
 		digitalWrite(UP_RELAY_PIN, RELAY_OFF);
 		digitalWrite(DOWN_RELAY_PIN, RELAY_OFF);
 		break;
