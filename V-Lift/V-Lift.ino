@@ -33,13 +33,13 @@ Author:		David Carrel
 void setButtonLEDs(int freq = 0);
 
 // Device parameters
-char _version[VERSION_STR_LEN] = "v1.05";
+char _version[VERSION_STR_LEN] = "v1.06";
 char myUniqueId[17];
 char statusTopic[128];
 
 int myPodNum = -1;
 podState *myPod;
-podState pods[NUM_PODS];
+podState pods[NUM_PODS + 1];  // 0 is (virtual) system
 
 // WiFi parameters
 WiFiClient _wifi;
@@ -132,7 +132,7 @@ static struct mqttState _mqttAllEntities[] =
 #define DATA_INTERVAL STATUS_INTERVAL_THIRTY_SECONDS
 #define POD2POD_DATA_INTERVAL STATUS_INTERVAL_FIVE_SECONDS
 
-#define POD_DATA_IS_FRESH(_podNum) ((pods[_podNum - 1].lastUpdate != 0) && (millis() - pods[_podNum - 1].lastUpdate) < (4 * DATA_INTERVAL))
+#define POD_DATA_IS_FRESH(_podNum) ((pods[_podNum].lastUpdate != 0) && (millis() - pods[_podNum].lastUpdate) < (4 * DATA_INTERVAL))
 
 #ifdef USE_DISPLAY
 // Pins GPIO22 and GPIO21 (SCL/SDA) if ESP32
@@ -175,7 +175,7 @@ void setup()
 	delay(500);
 #endif
 
-	for (int podIdx = 0; podIdx < NUM_PODS; podIdx++) {
+	for (int podIdx = 0; podIdx <= NUM_PODS; podIdx++) {
 		pods[podIdx].lastUpdate = 0;
 	}
 
@@ -198,13 +198,13 @@ void setup()
 #else // DAVE_FORCE_POD_NUM
 		myPodNum = getPodNumFromButton();
 #endif // DAVE_FORCE_POD_NUM
-		myPod = &pods[myPodNum - 1];
+		myPod = &pods[myPodNum];
 		preferences.begin(DEVICE_NAME, false); // RW
 		preferences.putInt(PREF_NAME_POD_NUM, myPodNum);
 		preferences.end();
 	} else {
 		myPodNum = config.podNumber;
-		myPod = &pods[config.podNumber - 1];
+		myPod = &pods[config.podNumber];
 	}
 
 	// If config is not setup, then enter config mode
@@ -239,8 +239,8 @@ void setup()
 #endif // USE_DISPLAY
 
 	pinMode(BAT_READ_PIN, INPUT);		// Configure pin for battery voltage
-	pinMode(TOP_SENSOR_PIN, INPUT);
-	pinMode(BOT_SENSOR_PIN, INPUT);
+	pinMode(TOP_SENSOR_PIN, INPUT_PULLUP);
+	pinMode(BOT_SENSOR_PIN, INPUT_PULLUP);
 	pinMode(UP_RELAY_PIN, OUTPUT);		// Configure pin for controlling relay
 	pinMode(DOWN_RELAY_PIN, OUTPUT);	// Configure pin for controlling relay
 
@@ -375,9 +375,7 @@ configLoop (void)
 			break;
 		}
 #else // USE_BUTTON_INTERRUPTS
-		if (digitalRead(CONFIG_BUTTON_PIN) == LOW) {
-			break;
-		}
+#error Not handled
 #endif // USE_BUTTON_INTERRUPTS
 
 		delay(30);
@@ -476,6 +474,7 @@ loop ()
 #endif // USE_DISPLAY
 	static unsigned long lastRunStatus = 0;
 	static unsigned long lastRunSendData = 0;
+	static unsigned long lastRunPodData = 0;
 	boolean wifiIsOn = false;
 	boolean mqttIsOn = false;
 
@@ -536,6 +535,7 @@ loop ()
 	if (resendAllData) {
 		// Read and transmit all entity & HA data to MQTT
 		lastRunSendData = 0;
+		lastRunPodData = 0;
 		resendAllData = false;
 	}
 
@@ -547,27 +547,24 @@ loop ()
 		}
 
 		// Send status/keepalive
-// DAVE - adjust frequencies
+		if (wifiIsOn && checkTimer(&lastRunPodData, POD2POD_DATA_INTERVAL)) {
+// DAVE			sendCommandsToRemotePods();
+		}
 
 		if (mqttIsOn && checkTimer(&lastRunStatus, STATUS_INTERVAL)) {
 			sendStatus();
 		}
 
 		if (mqttIsOn && checkTimer(&lastRunSendData, DATA_INTERVAL)) {
-// DAVE - do I check received zigbee data here??
 			sendHaData();
 			sendData();
 		}
-
-		if (wifiIsOn && checkTimer(&lastRunSendData, POD2POD_DATA_INTERVAL)) {
-// DAVE			sendCommandsToRemotePods();
-		}
 	} else {
-		if (wifiIsOn && checkTimer(&lastRunSendData, POD2POD_DATA_INTERVAL)) {
+// DAVE		getCommandsFromNumberOne();
+
+		if (wifiIsOn && checkTimer(&lastRunPodData, POD2POD_DATA_INTERVAL)) {
 			sendPodInfoToNumberOne();
 		}
-
-// DAVE		getCommandsFromNumberOne();
 	}
 
 #ifdef USE_DISPLAY
@@ -663,7 +660,7 @@ getRemotePodStatus (void)
 #endif // DEBUG_OVER_SERIAL
 
 		// read the packet into buffer
-		int podNum, podIdx, len = udp.read(buf, sizeof(buf));
+		int podNum, len = udp.read(buf, sizeof(buf));
 		if (len > 0) {
 			buf[len] = 0;
 #ifdef DEBUG_OVER_SERIAL
@@ -675,12 +672,14 @@ getRemotePodStatus (void)
 #endif // DEBUG_UDP
 			podNum = parseInt(buf, "PN=");
 			if (podNum > 1 && podNum <= NUM_PODS) {
-				podIdx = podNum - 1;
-				pods[podIdx].batteryPct = parseInt(buf, "BP=");
-				pods[podIdx].topSensor = parseBool(buf, "TS=");
-				pods[podIdx].botSensor = parseBool(buf, "BS=");
-				parseStr(buf, "VV=", pods[podIdx].version, sizeof(pods[podIdx].version));
-				pods[podIdx].lastUpdate = millis();
+				pods[podNum].batteryPct = parseInt(buf, "BP=");
+				pods[podNum].mode = (liftModes)parseInt(buf, "MO=");
+				pods[podNum].action = (liftActions)parseInt(buf, "AC=");
+				pods[podNum].position = (liftPositions)parseInt(buf, "PO=");
+				pods[podNum].topSensor = parseBool(buf, "TS=");
+				pods[podNum].botSensor = parseBool(buf, "BS=");
+				parseStr(buf, "VV=", pods[podNum].version, sizeof(pods[podNum].version));
+				pods[podNum].lastUpdate = millis();
 			}
 		}
 		packetSize = udp.parsePacket(); // Try to get another.
@@ -693,15 +692,17 @@ sendPodInfoToNumberOne (void)
 	IPAddress numOneIP(192, 168, PRIV_WIFI_SUBNET, 1);
 
 	udp.beginPacket(numOneIP, PRIV_UDP_PORT);
-	udp.printf("PN=%1d,BP=%03d,TS=%c,BS=%c,VV=%s", myPodNum, myPod->batteryPct, myPod->topSensor ? '1' : '0', myPod->botSensor ? '1' : '0', myPod->version);
+	udp.printf("PN=%d,BP=%d,MO=%d,AC=%d,PO=%d,TS=%c,BS=%c,VV=%s", myPodNum, myPod->batteryPct,
+		   myPod->mode, myPod->action, myPod->position, myPod->topSensor ? '1' : '0', myPod->botSensor ? '1' : '0', myPod->version);
 #ifndef DEBUG_UDP
 	udp.endPacket();
 #else // ! DEBUG_UDP
 	int err = udp.endPacket();
 	if (err == 0) {
 		udpPacketsSentErrors++;
+	} else {
+		udpPacketsSent++;
 	}
-	udpPacketsSent++;
 #endif // ! DEBUG_UDP
 }
 
@@ -790,13 +791,14 @@ setPodAction (void)
 }
 
 // Read the buttons and save
-// DAVE - Can this be interrupt driven?
 void
 readModeFromButtons(void)
 {
 	boolean upPress = false, downPress = false;
+#ifdef USE_LONG_PRESS
 	boolean upLongPress = false, downLongPress = false;
 	static uint32_t upPressLastTime = 0, downPressLastTime = 0;
+#endif // USE_LONG_PRESS
 
 #define LONG_PRESS_TIME 3000    // 3 seconds
 
@@ -809,6 +811,7 @@ readModeFromButtons(void)
 		interrupts();
 
 		if (changed) {
+#ifdef USE_LONG_PRESS
 			if (!pressed) { // Button released
 				unsigned long pressDuration = millis() - upPressLastTime;
 				if (upPressLastTime && (pressDuration >= LONG_PRESS_TIME)) {
@@ -820,6 +823,11 @@ readModeFromButtons(void)
 			} else { // Button pressed
 				upPressLastTime = millis();
 			}
+#else // USE_LONG_PRESS
+			if (!pressed) { // Button released
+				upPress = true;
+			}
+#endif // USE_LONG_PRESS
 		}
 	}
 	if (downButtonChanged) {
@@ -830,6 +838,7 @@ readModeFromButtons(void)
 		interrupts();
 
 		if (changed) {
+#ifdef USE_LONG_PRESS
 			if (!pressed) { // Button released
 				unsigned long pressDuration = millis() - downPressLastTime;
 				if (downPressLastTime && (pressDuration >= LONG_PRESS_TIME)) {
@@ -841,36 +850,15 @@ readModeFromButtons(void)
 			} else { // Button pressed
 				downPressLastTime = millis();
 			}
+#else // USE_LONG_PRESS
+			if (!pressed) { // Button released
+				downPress = true;
+			}
+#endif // USE_LONG_PRESS
 		}
 	}
 #else // USE_BUTTON_INTERRUPTS
-	if (digitalRead(UP_BUTTON_PIN) == LOW) {
-		upPress = true;
-		uint32_t now = millis();
-		if (upPressLastTime) {
-			if ((upPressLastTime + LONG_PRESS_TIME) > now) {
-				upLongPress = true;
-			}
-		} else {
-			upPressLastTime = now;
-		}
-	} else {
-		upPressLastTime = 0;
-	}
-
-	if (digitalRead(DOWN_BUTTON_PIN) == LOW) {
-		downPress = true;
-		uint32_t now = millis();
-		if (downPressLastTime) {
-			if ((downPressLastTime + LONG_PRESS_TIME) > now) {
-				downLongPress = true;
-			}
-		} else {
-			downPressLastTime = now;
-		}
-	} else {
-		downPressLastTime = 0;
-	}
+#error Not handled
 #endif // USE_BUTTON_INTERRUPTS
 
 	if (upPress) {
@@ -900,11 +888,11 @@ readPodState(void)
 
 #define SENSOR_NUM_SAMPLES 16
 	for (int i = 0; i < SENSOR_NUM_SAMPLES; i++) {
-		if (digitalRead(TOP_SENSOR_PIN) == HIGH) {
+		if (digitalRead(TOP_SENSOR_PIN) == LOW) {
 			// If ANY sample is true, set it as "wet"
 			top = true;
 		}
-		if (digitalRead(BOT_SENSOR_PIN) == HIGH) {
+		if (digitalRead(BOT_SENSOR_PIN) == LOW) {
 			// If ANY sample is true, set it as "wet"
 			bottomCount++;
 		}
@@ -1510,22 +1498,22 @@ lookupEntity(mqttEntityId entityId)
 }
 
 void
-readEntity(mqttState *singleEntity, char *value, int podIdx)
+readEntity(mqttState *singleEntity, char *value, int podNum)
 {
-	value[0] = 0;
+	strcpy(value, "unknown");
 
 	switch (singleEntity->entityId) {
 	case mqttEntityId::entityBatPct:
-		sprintf(value, "%d", pods[podIdx].batteryPct);
+		sprintf(value, "%d", pods[podNum].batteryPct);
 		break;
 	case mqttEntityId::entityBatVlt:
-		sprintf(value, "%0.02f", pods[podIdx].batteryVolts);
+		sprintf(value, "%0.02f", pods[podNum].batteryVolts);
 		break;
 	case mqttEntityId::entityTopSensor:
-		sprintf(value, "%s", pods[podIdx].topSensor ? "Wet" : "Dry");
+		sprintf(value, "%s", pods[podNum].topSensor ? "Wet" : "Dry");
 		break;
 	case mqttEntityId::entityBotSensor:
-		sprintf(value, "%s", pods[podIdx].botSensor ? "Wet" : "Dry");
+		sprintf(value, "%s", pods[podNum].botSensor ? "Wet" : "Dry");
 		break;
 #ifdef DEBUG_CALLBACKS
 	case mqttEntityId::entityCallbacks:
@@ -1543,7 +1531,7 @@ readEntity(mqttState *singleEntity, char *value, int podIdx)
 		break;
 #endif // DEBUG_UPTIME
 	case mqttEntityId::entityVersion:
-		sprintf(value, "%s", pods[podIdx].version);
+		sprintf(value, "%s", pods[podNum].version);
 		break;
 #ifdef DEBUG_WIFI
 	case mqttEntityId::entityRSSI:
@@ -1564,7 +1552,7 @@ readEntity(mqttState *singleEntity, char *value, int podIdx)
 #endif // DEBUG_WIFI
 	}
 
-	if (singleEntity->allPods && !POD_DATA_IS_FRESH(podIdx + 1)) {
+	if (singleEntity->allPods && !POD_DATA_IS_FRESH(podNum)) {
 		strcpy(value, "unavailable");
 	}
 }
@@ -1575,13 +1563,13 @@ readEntity(mqttState *singleEntity, char *value, int podIdx)
  * Query the handled entity in the usual way, and add the cleansed output to the buffer
  */
 boolean
-addState(mqttState *singleEntity, int podIdx)
+addState(mqttState *singleEntity, int podNum)
 {
 	char response[MAX_FORMATTED_DATA_VALUE_LENGTH];
 	boolean result;
 
 	// Read the register(s)/data
-	readEntity(singleEntity, &response[0], podIdx);
+	readEntity(singleEntity, &response[0], podNum);
 
 	result = addToPayload(response);
 
@@ -1604,13 +1592,13 @@ sendStatus(void)
 }
 
 boolean
-addConfig(mqttState *singleEntity, int podIdx)
+addConfig(mqttState *singleEntity, int podNum)
 {
 	char stateAddition[1024] = "";
-	char prettyName[MAX_MQTT_NAME_LENGTH], mqttName[MAX_MQTT_NAME_LENGTH];
+	char prettyName[MAX_MQTT_NAME_LENGTH + 8], mqttName[MAX_MQTT_NAME_LENGTH + 8];
 
 	if (singleEntity->allPods) {
-		snprintf(mqttName, sizeof(mqttName), "Pod%d_%s", podIdx + 1, singleEntity->mqttName);
+		snprintf(mqttName, sizeof(mqttName), "Pod%d_%s", podNum, singleEntity->mqttName);
 	} else {
 		strlcpy(mqttName, singleEntity->mqttName, sizeof(mqttName));
 	}
@@ -1856,8 +1844,7 @@ sendDataFromMqttState(mqttState *singleEntity, bool doHomeAssistant)
 		return;
 
 	loopCount = singleEntity->allPods ? NUM_PODS : 1;
-	for (int podIdx = 0; podIdx < loopCount; podIdx++) {
-		int podNum = podIdx + 1;
+	for (int podNum = 1; podNum <= loopCount; podNum++) {
 		emptyPayload();
 
 		if (doHomeAssistant) {
@@ -1883,14 +1870,14 @@ sendDataFromMqttState(mqttState *singleEntity, bool doHomeAssistant)
 			} else {
 				snprintf(topic, sizeof(topic), "homeassistant/%s/%s/%s/config", entityType, myUniqueId, singleEntity->mqttName);
 			}
-			result = addConfig(singleEntity, podIdx);
+			result = addConfig(singleEntity, podNum);
 		} else {
 			if (singleEntity->allPods) {
 				snprintf(topic, sizeof(topic), DEVICE_NAME "/%s/Pod%d_%s/state", myUniqueId, podNum, singleEntity->mqttName);
 			} else {
 				snprintf(topic, sizeof(topic), DEVICE_NAME "/%s/%s/state", myUniqueId, singleEntity->mqttName);
 			}
-			result = addState(singleEntity, podIdx);
+			result = addState(singleEntity, podNum);
 		}
 
 		if (result) {
