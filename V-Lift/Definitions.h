@@ -21,7 +21,6 @@ Author:		David Carrel
 
 // How many pods are being controlled
 #define NUM_PODS 2
-//#define DAVE_FORCE_POD_NUM 1
 
 /*************************************************
  * XIAO ESP32C6 Pin map

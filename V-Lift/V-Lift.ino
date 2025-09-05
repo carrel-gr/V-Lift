@@ -33,7 +33,7 @@ Author:		David Carrel
 void setButtonLEDs(int freq = 0);
 
 // Device parameters
-char _version[VERSION_STR_LEN] = "v1.06";
+char _version[VERSION_STR_LEN] = "v1.07";
 char myUniqueId[17];
 char statusTopic[128];
 
@@ -193,11 +193,7 @@ void setup()
 	preferences.end();
 
 	if ((config.podNumber < 1) || (config.podNumber > NUM_PODS)) {
-#ifdef DAVE_FORCE_POD_NUM
-		myPodNum = DAVE_FORCE_POD_NUM;
-#else // DAVE_FORCE_POD_NUM
 		myPodNum = getPodNumFromButton();
-#endif // DAVE_FORCE_POD_NUM
 		myPod = &pods[myPodNum];
 		preferences.begin(DEVICE_NAME, false); // RW
 		preferences.putInt(PREF_NAME_POD_NUM, myPodNum);
@@ -285,6 +281,8 @@ void setup()
 	strlcpy(myPod->version, &_version[1], sizeof(myPod->version)); // skip initial 'v'
 	readBattery();
 	readPodState();
+	pods[0].mode = modeUp;		// System mode
+	pods[0].action = actionStop;	// System action
 	myPod->mode = modeUp;		// Always go to UP state when we boot.
 	myPod->action = actionStop;	// and stop until loop reads position
 
@@ -522,15 +520,17 @@ loop ()
 	// Update the pod state
         readBattery();
         readPodState();        // reads/sets sensors, and sets myPod->position
-	// MQTT/Zigbee might have asynchronously updated myPod->mode
-	if (myPodNum == 1) {
-		readModeFromButtons();  // Set myPod->mode based on buttons and current action
-#ifdef USE_ZIGBEE
-		readModeFromRemote();  // Set myPod->mode based on zigbee remote and current action
-#endif // USE_ZIGBEE
-	}
-	setPodAction();	// Set myPod->action and activate relays
 	myPod->lastUpdate = millis();
+
+	// MQTT/Zigbee might have asynchronously updated pods[0].mode
+	if (myPodNum == 1) {
+		readSystemModeFromButtons();  // Set system (pods[0]) mode based on buttons and system action
+	} else {
+		getSystemModeFromNumberOne();
+	}
+	myPod->mode = pods[0].mode;
+	setPodAction();		// Set myPod->action
+	engagePodAction();	// activate relays
 
 	if (resendAllData) {
 		// Read and transmit all entity & HA data to MQTT
@@ -548,7 +548,7 @@ loop ()
 
 		// Send status/keepalive
 		if (wifiIsOn && checkTimer(&lastRunPodData, POD2POD_DATA_INTERVAL)) {
-// DAVE			sendCommandsToRemotePods();
+			sendCommandsToRemotePods();
 		}
 
 		if (mqttIsOn && checkTimer(&lastRunStatus, STATUS_INTERVAL)) {
@@ -560,8 +560,6 @@ loop ()
 			sendData();
 		}
 	} else {
-// DAVE		getCommandsFromNumberOne();
-
 		if (wifiIsOn && checkTimer(&lastRunPodData, POD2POD_DATA_INTERVAL)) {
 			sendPodInfoToNumberOne();
 		}
@@ -642,6 +640,70 @@ parseBool (char *data, const char *key)
 }
 
 #define UDP_BUF_SIZ 128
+void
+getSystemModeFromNumberOne (void)
+{
+	char buf[UDP_BUF_SIZ];
+	int packetSize = udp.parsePacket();
+
+	while (packetSize) {
+#ifdef DEBUG_OVER_SERIAL
+		Serial.print("Received packet of size ");
+		Serial.println(packetSize);
+		Serial.print("From ");
+		IPAddress remoteIp = udp.remoteIP();
+		Serial.print(remoteIp);
+		Serial.print(", port ");
+		Serial.println(udp.remotePort());
+#endif // DEBUG_OVER_SERIAL
+
+		// read the packet into buffer
+		int podNum, len = udp.read(buf, sizeof(buf));
+		if (len > 0) {
+			buf[len] = 0;
+#ifdef DEBUG_OVER_SERIAL
+			Serial.print("Data is: ");
+			Serial.println(buf);
+#endif // DEBUG_OVER_SERIAL
+#ifdef DEBUG_UDP
+			udpPacketsReceived++;
+#endif // DEBUG_UDP
+			podNum = parseInt(buf, "PN=");
+			if (podNum == 0) {
+				liftModes mode = (liftModes)parseInt(buf, "MO=");
+				if (mode != pods[podNum].mode) {
+					resendAllData = true;
+				}
+				pods[podNum].mode = mode;
+//				pods[podNum].action = (liftActions)parseInt(buf, "AC=");
+				pods[podNum].lastUpdate = millis();
+			}
+		}
+		packetSize = udp.parsePacket(); // Try to get another.
+	}
+}
+
+void
+sendCommandsToRemotePods (void)
+{
+	for (int podNum = 2; podNum <= NUM_PODS; podNum++) {
+		IPAddress podIP(192, 168, PRIV_WIFI_SUBNET, podNum);
+
+		udp.beginPacket(podIP, PRIV_UDP_PORT);
+		udp.printf("PN=0,MO=%d", pods[0].mode);
+#ifndef DEBUG_UDP
+		udp.endPacket();
+#else // ! DEBUG_UDP
+		int err = udp.endPacket();
+		if (err == 0) {
+			udpPacketsSentErrors++;
+		} else {
+			udpPacketsSent++;
+		}
+#endif // ! DEBUG_UDP
+	}
+}
+
 void
 getRemotePodStatus (void)
 {
@@ -748,28 +810,30 @@ setButtonLEDs (int freq)
 void
 setPodAction (void)
 {
+	liftActions action = actionStop;
+
 	// Set pod relay actions
-	if (myPod->mode == modeOff) {
-		myPod->action = actionStop;
-	} else {
+	if ((myPod->mode == modeUp) || (myPod->mode == modeDown)) {
 		switch (myPod->position) {
 		case positionUp:
-			myPod->action = (myPod->mode == modeUp) ? actionStop : actionLower;
+			action = (myPod->mode == modeUp) ? actionStop : actionLower;
 			break;
 		case positionAlmostUp:
 		case positionMiddle:
 		case positionAlmostDown:
-			myPod->action = (myPod->mode == modeUp) ? actionRaise : actionLower;
+			action = (myPod->mode == modeUp) ? actionRaise : actionLower;
 			break;
 		case positionDown:
-			myPod->action = (myPod->mode == modeUp) ? actionRaise : actionStop;
-			break;
-		default:  // Shouldn't happen.
-			myPod->action = actionStop;
+			action = (myPod->mode == modeUp) ? actionRaise : actionStop;
 			break;
 		}
 	}
+	myPod->action = action;
+}
 
+void
+engagePodAction (void)
+{
 #define RELAY_ON  HIGH
 #define RELAY_OFF LOW
 
@@ -792,7 +856,7 @@ setPodAction (void)
 
 // Read the buttons and save
 void
-readModeFromButtons(void)
+readSystemModeFromButtons(void)
 {
 	boolean upPress = false, downPress = false;
 #ifdef USE_LONG_PRESS
@@ -862,17 +926,23 @@ readModeFromButtons(void)
 #endif // USE_BUTTON_INTERRUPTS
 
 	if (upPress) {
-		if (myPod->action == actionRaise) {
-			myPod->mode = modeOff;
+		if (pods[0].action == actionRaise) {
+			pods[0].mode = modeOff;
+			pods[0].action = actionStop;
 		} else {
-			myPod->mode = modeUp;
+			pods[0].mode = modeUp;
+			pods[0].action = actionRaise;
 		}
+		resendAllData = true;
 	} else if (downPress) {
-		if (myPod->action == actionLower) {
-			myPod->mode = modeOff;
+		if (pods[0].action == actionLower) {
+			pods[0].mode = modeOff;
+			pods[0].action = actionStop;
 		} else {
-			myPod->mode = modeDown;
+			pods[0].mode = modeDown;
+			pods[0].action = actionLower;
 		}
+		resendAllData = true;
 	}
 }
 
