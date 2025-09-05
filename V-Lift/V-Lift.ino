@@ -14,6 +14,7 @@ Author:		David Carrel
 #include <Arduino.h>
 #include <driver/rtc_io.h>
 #include <WiFi.h>
+#include <NetworkUdp.h>
 #include <WebServer.h>
 #ifndef MP_XIAO_ESP32C6
 #define LED_BUILTIN 2
@@ -32,11 +33,13 @@ Author:		David Carrel
 void setButtonLEDs(int freq = 0);
 
 // Device parameters
-char _version[6] = "v1.04";
+char _version[VERSION_STR_LEN] = "v1.05";
 char myUniqueId[17];
 char statusTopic[128];
 
-podState myPod;
+int myPodNum = -1;
+podState *myPod;
+podState pods[NUM_PODS];
 
 // WiFi parameters
 WiFiClient _wifi;
@@ -46,6 +49,13 @@ wifi_power_t wifiPower = WIFI_POWER_11dBm; // Will bump to max before setting
 PubSubClient _mqtt(_wifi);
 char* _mqttPayload = NULL;
 bool resendAllData = false;
+
+NetworkUDP udp;
+#ifdef DEBUG_UDP
+unsigned int udpPacketsSent = 0;
+unsigned int udpPacketsSentErrors = 0;
+unsigned int udpPacketsReceived = 0;
+#endif // DEBUG_UDP
 
 #ifdef USE_BUTTON_INTERRUPTS
 volatile boolean configButtonPressed = false;
@@ -83,39 +93,46 @@ uint32_t badCallbacks = 0;
  */
 static struct mqttState _mqttAllEntities[] =
 {
-	// Entity,                                "Name",              Subscribe, Retain, HA Class
+	// Entity,                                "Name",           allPods, Subscribe, Retain, HA Class
 #ifdef DEBUG_FREEMEM
-	{ mqttEntityId::entityFreemem,            "freemem",           false, false, homeAssistantClass::haClassInfo },
+	{ mqttEntityId::entityFreemem,            "freemem",           false, false, false, homeAssistantClass::haClassInfo },
 #endif
 #ifdef DEBUG_CALLBACKS
-	{ mqttEntityId::entityCallbacks,          "Callbacks",         false, false, homeAssistantClass::haClassInfo },
+	{ mqttEntityId::entityCallbacks,          "Callbacks",         false, false, false, homeAssistantClass::haClassInfo },
 #endif // DEBUG_CALLBACKS
 #ifdef DEBUG_WIFI
-	{ mqttEntityId::entityRSSI,               "RSSI",              false, false, homeAssistantClass::haClassInfo },
-	{ mqttEntityId::entityBSSID,              "BSSID",             false, false, homeAssistantClass::haClassInfo },
-	{ mqttEntityId::entityTxPower,            "TX_Power",          false, false, homeAssistantClass::haClassInfo },
-	{ mqttEntityId::entityWifiRecon,          "reconnects",        false, false, homeAssistantClass::haClassInfo },
+	{ mqttEntityId::entityRSSI,               "RSSI",              false, false, false, homeAssistantClass::haClassInfo },
+	{ mqttEntityId::entityBSSID,              "BSSID",             false, false, false, homeAssistantClass::haClassInfo },
+	{ mqttEntityId::entityTxPower,            "TX_Power",          false, false, false, homeAssistantClass::haClassInfo },
+	{ mqttEntityId::entityWifiRecon,          "reconnects",        false, false, false, homeAssistantClass::haClassInfo },
 #endif // DEBUG_WIFI
 #ifdef DEBUG_UPTIME
-	{ mqttEntityId::entityUptime,             "Uptime",            false, false, homeAssistantClass::haClassDuration },
+	{ mqttEntityId::entityUptime,             "Uptime",            false, false, false, homeAssistantClass::haClassDuration },
 #endif // DEBUG_UPTIME
-	{ mqttEntityId::entityVersion,            "Version",           false, true,  homeAssistantClass::haClassInfo },
-	{ mqttEntityId::entityBatPct,             "Battery",           false, true,  homeAssistantClass::haClassBattery },
-	{ mqttEntityId::entityBatVlt,             "Battery_Voltage",   false, true,  homeAssistantClass::haClassVoltage },
-	{ mqttEntityId::entityTopSensor,          "Top_Sensor",        false, true,  homeAssistantClass::haClassMoisture },
-	{ mqttEntityId::entityBotSensor,          "Bottom_Sensor",     false, true,  homeAssistantClass::haClassMoisture }
+	{ mqttEntityId::entityVersion,            "Version",           true,  false, true,  homeAssistantClass::haClassInfo },
+	{ mqttEntityId::entityBatPct,             "Battery",           true,  false, true,  homeAssistantClass::haClassBattery },
+	{ mqttEntityId::entityBatVlt,             "Battery_Voltage",   false, false, true,  homeAssistantClass::haClassVoltage },
+	{ mqttEntityId::entityTopSensor,          "Top_Sensor",        true,  false, true,  homeAssistantClass::haClassMoisture },
+	{ mqttEntityId::entityBotSensor,          "Bottom_Sensor",     true,  false, true,  homeAssistantClass::haClassMoisture }
 };
 
 // These timers are used in the main loop.
-#define RUNSTATE_INTERVAL 5000
+#define RUNSTATE_INTERVAL 2000
 #define STATUS_INTERVAL_ONE_SECOND 1000
+#define STATUS_INTERVAL_FIVE_SECONDS 5000
 #define STATUS_INTERVAL_TEN_SECONDS 10000
+#define STATUS_INTERVAL_THIRTY_SECONDS 30000
 #define STATUS_INTERVAL_ONE_MINUTE 60000
 #define STATUS_INTERVAL_FIVE_MINUTE 300000
 #define STATUS_INTERVAL_ONE_HOUR 3600000
 #define STATUS_INTERVAL_ONE_DAY 86400000
 #define UPDATE_STATUS_BAR_INTERVAL 500
 #define WIFI_RECONNECT_INTERVAL 500  // 1/2 second
+#define STATUS_INTERVAL STATUS_INTERVAL_TEN_SECONDS
+#define DATA_INTERVAL STATUS_INTERVAL_THIRTY_SECONDS
+#define POD2POD_DATA_INTERVAL STATUS_INTERVAL_FIVE_SECONDS
+
+#define POD_DATA_IS_FRESH(_podNum) ((pods[_podNum - 1].lastUpdate != 0) && (millis() - pods[_podNum - 1].lastUpdate) < (4 * DATA_INTERVAL))
 
 #ifdef USE_DISPLAY
 // Pins GPIO22 and GPIO21 (SCL/SDA) if ESP32
@@ -158,6 +175,10 @@ void setup()
 	delay(500);
 #endif
 
+	for (int podIdx = 0; podIdx < NUM_PODS; podIdx++) {
+		pods[podIdx].lastUpdate = 0;
+	}
+
 	preferences.begin(DEVICE_NAME, true); // RO
 	config.wifiSSID = preferences.getString(PREF_NAME_SSID, "");
 	config.wifiPass = preferences.getString(PREF_NAME_PASS, "");
@@ -172,25 +193,25 @@ void setup()
 	preferences.end();
 
 	if ((config.podNumber < 1) || (config.podNumber > NUM_PODS)) {
-		int podNum;
 #ifdef DAVE_FORCE_POD_NUM
-		podNum = DAVE_FORCE_POD_NUM;
+		myPodNum = DAVE_FORCE_POD_NUM;
 #else // DAVE_FORCE_POD_NUM
-		podNum = getPodNumFromButton();
+		myPodNum = getPodNumFromButton();
 #endif // DAVE_FORCE_POD_NUM
-		myPod.podNum = podNum;
+		myPod = &pods[myPodNum - 1];
 		preferences.begin(DEVICE_NAME, false); // RW
-		preferences.putInt(PREF_NAME_POD_NUM, podNum);
+		preferences.putInt(PREF_NAME_POD_NUM, myPodNum);
 		preferences.end();
 	} else {
-		myPod.podNum = config.podNumber;
+		myPodNum = config.podNumber;
+		myPod = &pods[config.podNumber - 1];
 	}
 
 	// If config is not setup, then enter config mode
-	if (myPod.podNum == 1) {
+	if (myPodNum == 1) {
 		uint8_t mac[6];
 		// Set our unique identity.
-		WiFi.mode(WIFI_STA); // Kick WiFi just enough so MAC is readable
+		WiFi.mode(WIFI_AP_STA); // Kick WiFi just enough so MAC is readable
 		WiFi.macAddress(mac);
 		snprintf(myUniqueId, sizeof(myUniqueId), DEVICE_NAME "-%0X%02X%02X", mac[3] & 0xf, mac[4], mac[5]);
 		snprintf(statusTopic, sizeof(statusTopic), DEVICE_NAME "/%s/status", myUniqueId);
@@ -205,12 +226,13 @@ void setup()
 			ESP.restart();
 		}
 	} else {
-		snprintf(myUniqueId, sizeof(myUniqueId), DEVICE_NAME "-pod%d", myPod.podNum);
+		WiFi.mode(WIFI_STA);
+		snprintf(myUniqueId, sizeof(myUniqueId), DEVICE_NAME "-pod%d", myPodNum);
 	}
 #ifdef USE_DISPLAY
 	{
 		char line3[OLED_CHARACTER_WIDTH];
-		snprintf(line3, sizeof(line3), "Pod # %d", myPod.podNum);
+		snprintf(line3, sizeof(line3), "Pod # %d", myPodNum);
 		updateOLED(false, "Config is set", line3, _version);
 		delay(2000); // DAVE
 	}
@@ -222,7 +244,7 @@ void setup()
 	pinMode(UP_RELAY_PIN, OUTPUT);		// Configure pin for controlling relay
 	pinMode(DOWN_RELAY_PIN, OUTPUT);	// Configure pin for controlling relay
 
-	if (myPod.podNum == 1) {
+	if (myPodNum == 1) {
 		pinMode(UP_BUTTON_PIN, INPUT_PULLUP);
 		pinMode(DOWN_BUTTON_PIN, INPUT_PULLUP);
 #ifdef USE_BUTTON_INTERRUPTS
@@ -237,10 +259,12 @@ void setup()
 		pinMode(WIFI_ANT_CONFIG, OUTPUT);
 		digitalWrite(WIFI_ANT_CONFIG, config.extAntenna ? HIGH : LOW);
 #endif // MP_XIAO_ESP32C6
+	}
 
-		// Configure WIFI
-		checkWifiStatus(true);
+	// Configure WIFI
+	checkWifiStatus(true);
 
+	if (myPodNum == 1) {
 		// Configure MQTT to the address and port specified above
 		_mqtt.setServer(config.mqttSrvr.c_str(), config.mqttPort);
 		_mqtt.setBufferSize(MAX_MQTT_PAYLOAD_SIZE + MQTT_HEADER_SIZE);
@@ -257,18 +281,19 @@ void setup()
 	}
 
 	// Initialize data.
-	// myPod.podNum was set above.
+	// myPodNum was set above.
+	strlcpy(myPod->version, &_version[1], sizeof(myPod->version)); // skip initial 'v'
 	readBattery();
 	readPodState();
-	myPod.mode = modeUp;		// Always go to UP state when we boot.
-	myPod.action = actionStop;	// and stop until loop reads position
+	myPod->mode = modeUp;		// Always go to UP state when we boot.
+	myPod->action = actionStop;	// and stop until loop reads position
 
 #ifdef USE_DISPLAY
 	updateOLED(false, myUniqueId, "setup complete", _version);
 #endif // USE_DISPLAY
 	for (int i = 0; i < 10; i++) {
 		flashBuiltinLed(500);
-		if (myPod.podNum == 1) {
+		if (myPodNum == 1) {
 			setButtonLEDs(500);
 		}
 		delay(500);
@@ -316,7 +341,7 @@ getPodNumFromButton (void)
 }
 
 void
-configLoop(void)
+configLoop (void)
 {
 #ifdef USE_DISPLAY
 	bool flip = false;
@@ -339,7 +364,7 @@ configLoop(void)
 		}
 #endif // USE_DISPLAY
 		flashBuiltinLed(250);
-		if (myPod.podNum == 1) {
+		if (myPodNum == 1) {
 			setButtonLEDs(250);
 		}
 
@@ -444,7 +469,7 @@ configHandler(void)
  * The loop function runs over and over again until power down or reset
  */
 void
-loop()
+loop ()
 {
 #ifdef USE_DISPLAY
 	static unsigned long lastRunDisplay = 0;
@@ -461,7 +486,7 @@ loop()
 		int podNum;
 		configButtonPressed = false;
 		podNum = getPodNumFromButton();
-		myPod.podNum = podNum;
+		myPodNum = podNum;
 		preferences.begin(DEVICE_NAME, false); // RW
 		preferences.putInt(PREF_NAME_POD_NUM, podNum);
 		preferences.end();
@@ -474,10 +499,10 @@ loop()
 #error Not handled
 #endif // USE_BUTTON_INTERRUPTS
 
-	if (myPod.podNum == 1) {
-		// Make sure WiFi is good
-		wifiIsOn = checkWifiStatus(false);
+	// Make sure WiFi is good
+	wifiIsOn = checkWifiStatus(false);
 
+	if (myPodNum == 1) {
 		// make sure mqtt is still connected
 		if (wifiIsOn) {
 			mqttIsOn = _mqtt.connected();
@@ -497,28 +522,31 @@ loop()
 
 	// Update the pod state
         readBattery();
-        readPodState();        // reads/sets sensors, and sets myPod.position
-	// MQTT/Zigbee might have asynchronously updated myPod.mode
-	if (myPod.podNum == 1) {
-		readModeFromButtons();  // Set myPod.mode based on buttons and current action
+        readPodState();        // reads/sets sensors, and sets myPod->position
+	// MQTT/Zigbee might have asynchronously updated myPod->mode
+	if (myPodNum == 1) {
+		readModeFromButtons();  // Set myPod->mode based on buttons and current action
 #ifdef USE_ZIGBEE
-		readModeFromRemote();  // Set myPod.mode based on zigbee remote and current action
+		readModeFromRemote();  // Set myPod->mode based on zigbee remote and current action
 #endif // USE_ZIGBEE
 	}
-	setPodAction();	// Set myPod.action and activate relays
+	setPodAction();	// Set myPod->action and activate relays
+	myPod->lastUpdate = millis();
 
-	if (myPod.podNum == 1) {
+	if (resendAllData) {
+		// Read and transmit all entity & HA data to MQTT
+		lastRunSendData = 0;
+		resendAllData = false;
+	}
+
+	if (myPodNum == 1) {
 		setButtonLEDs();
-// DAVE - do I check received zigbee data here??
-		if (resendAllData) {
-			// Read and transmit all entity & HA data to MQTT
-			lastRunSendData = 0;
-			resendAllData = false;
+
+		if (wifiIsOn) {
+			getRemotePodStatus();
 		}
 
 		// Send status/keepalive
-#define STATUS_INTERVAL STATUS_INTERVAL_TEN_SECONDS
-#define DATA_INTERVAL STATUS_INTERVAL_ONE_MINUTE
 // DAVE - adjust frequencies
 
 		if (mqttIsOn && checkTimer(&lastRunStatus, STATUS_INTERVAL)) {
@@ -530,12 +558,16 @@ loop()
 			sendHaData();
 			sendData();
 		}
-	} else {
-#ifdef USE_ZIGBEE
-		if (zigbeeIsOn && checkTimer(&lastRunSendData, DATA_INTERVAL)) {
-			sendZigbeeData();
+
+		if (wifiIsOn && checkTimer(&lastRunSendData, POD2POD_DATA_INTERVAL)) {
+// DAVE			sendCommandsToRemotePods();
 		}
-#endif // USE_ZIGBEE
+	} else {
+		if (wifiIsOn && checkTimer(&lastRunSendData, POD2POD_DATA_INTERVAL)) {
+			sendPodInfoToNumberOne();
+		}
+
+// DAVE		getCommandsFromNumberOne();
 	}
 
 #ifdef USE_DISPLAY
@@ -544,6 +576,133 @@ loop()
 		updateDisplayInfo();
 	}
 #endif // USE_DISPLAY
+}
+
+int
+parseInt (char *data, const char *key)
+{
+	char *valueStr, *end, endOrig;
+	int ret;
+
+	valueStr = strstr(data, key);
+	if (valueStr == NULL) {
+		return -1;
+	}
+	valueStr += strlen(key);
+
+	end = strchr(valueStr, ',');
+	if (end != NULL) {
+		endOrig = *end;
+		*end = '\0';
+	}
+
+	ret = atoi(valueStr);
+
+	if (end != NULL) {
+		*end = endOrig;
+	}
+
+	return ret;
+}
+
+void
+parseStr (char *data, const char *key, char *dest, size_t destLen)
+{
+	char *valueStr, *end, endOrig;
+
+	valueStr = strstr(data, key);
+	if (valueStr == NULL) {
+		dest[0] = '\0';
+		return;
+	}
+	valueStr += strlen(key);
+
+	end = strchr(valueStr, ',');
+	if (end != NULL) {
+		endOrig = *end;
+		*end = '\0';
+	}
+
+	strlcpy(dest, valueStr, destLen);
+
+	if (end != NULL) {
+		*end = endOrig;
+	}
+}
+
+bool
+parseBool (char *data, const char *key)
+{
+	char *valueStr;
+
+	valueStr = strstr(data, key);
+	if (valueStr == NULL) {
+		return -1;
+	}
+	valueStr += strlen(key);
+
+	return *valueStr == '1';
+}
+
+#define UDP_BUF_SIZ 128
+void
+getRemotePodStatus (void)
+{
+	char buf[UDP_BUF_SIZ];
+	int packetSize = udp.parsePacket();
+
+	while (packetSize) {
+#ifdef DEBUG_OVER_SERIAL
+		Serial.print("Received packet of size ");
+		Serial.println(packetSize);
+		Serial.print("From ");
+		IPAddress remoteIp = udp.remoteIP();
+		Serial.print(remoteIp);
+		Serial.print(", port ");
+		Serial.println(udp.remotePort());
+#endif // DEBUG_OVER_SERIAL
+
+		// read the packet into buffer
+		int podNum, podIdx, len = udp.read(buf, sizeof(buf));
+		if (len > 0) {
+			buf[len] = 0;
+#ifdef DEBUG_OVER_SERIAL
+			Serial.print("Data is: ");
+			Serial.println(buf);
+#endif // DEBUG_OVER_SERIAL
+#ifdef DEBUG_UDP
+			udpPacketsReceived++;
+#endif // DEBUG_UDP
+			podNum = parseInt(buf, "PN=");
+			if (podNum > 1 && podNum <= NUM_PODS) {
+				podIdx = podNum - 1;
+				pods[podIdx].batteryPct = parseInt(buf, "BP=");
+				pods[podIdx].topSensor = parseBool(buf, "TS=");
+				pods[podIdx].botSensor = parseBool(buf, "BS=");
+				parseStr(buf, "VV=", pods[podIdx].version, sizeof(pods[podIdx].version));
+				pods[podIdx].lastUpdate = millis();
+			}
+		}
+		packetSize = udp.parsePacket(); // Try to get another.
+	}
+}
+
+void
+sendPodInfoToNumberOne (void)
+{
+	IPAddress numOneIP(192, 168, PRIV_WIFI_SUBNET, 1);
+
+	udp.beginPacket(numOneIP, PRIV_UDP_PORT);
+	udp.printf("PN=%1d,BP=%03d,TS=%c,BS=%c,VV=%s", myPodNum, myPod->batteryPct, myPod->topSensor ? '1' : '0', myPod->botSensor ? '1' : '0', myPod->version);
+#ifndef DEBUG_UDP
+	udp.endPacket();
+#else // ! DEBUG_UDP
+	int err = udp.endPacket();
+	if (err == 0) {
+		udpPacketsSentErrors++;
+	}
+	udpPacketsSent++;
+#endif // ! DEBUG_UDP
 }
 
 // freq defaults to 0
@@ -563,18 +722,18 @@ setButtonLEDs (int freq)
 			digitalWrite(DOWN_LED_PIN, toggle ? LED_OFF : LED_ON);
 			toggle = !toggle;
 		}
-	} else if (myPod.mode == modeOff) {
+	} else if (myPod->mode == modeOff) {
 		// if mode == off, then slow flash both
 		if (checkTimer(&lastLed, 2000)) {
 			digitalWrite(UP_LED_PIN, toggle ? LED_ON : LED_OFF);
 			digitalWrite(DOWN_LED_PIN, toggle ? LED_ON : LED_OFF);
 			toggle = !toggle;
 		}
-	} else if (myPod.action == actionRaise) {
+	} else if (myPod->action == actionRaise) {
 		// if action raise, then turn on UP
 		digitalWrite(UP_LED_PIN, LED_ON);
 		digitalWrite(DOWN_LED_PIN, LED_OFF);
-	} else if (myPod.action == actionLower) {
+	} else if (myPod->action == actionLower) {
 		// if action lower, then turn on DOWN
 		digitalWrite(UP_LED_PIN, LED_OFF);
 		digitalWrite(DOWN_LED_PIN, LED_ON);
@@ -589,23 +748,23 @@ void
 setPodAction (void)
 {
 	// Set pod relay actions
-	if (myPod.mode == modeOff) {
-		myPod.action = actionStop;
+	if (myPod->mode == modeOff) {
+		myPod->action = actionStop;
 	} else {
-		switch (myPod.position) {
+		switch (myPod->position) {
 		case positionUp:
-			myPod.action = (myPod.mode == modeUp) ? actionStop : actionLower;
+			myPod->action = (myPod->mode == modeUp) ? actionStop : actionLower;
 			break;
 		case positionAlmostUp:
 		case positionMiddle:
 		case positionAlmostDown:
-			myPod.action = (myPod.mode == modeUp) ? actionRaise : actionLower;
+			myPod->action = (myPod->mode == modeUp) ? actionRaise : actionLower;
 			break;
 		case positionDown:
-			myPod.action = (myPod.mode == modeUp) ? actionRaise : actionStop;
+			myPod->action = (myPod->mode == modeUp) ? actionRaise : actionStop;
 			break;
 		default:  // Shouldn't happen.
-			myPod.action = actionStop;
+			myPod->action = actionStop;
 			break;
 		}
 	}
@@ -613,7 +772,7 @@ setPodAction (void)
 #define RELAY_ON  HIGH
 #define RELAY_OFF LOW
 
-	switch(myPod.action) {
+	switch(myPod->action) {
 	case actionRaise:
 		digitalWrite(UP_RELAY_PIN, RELAY_ON);
 		digitalWrite(DOWN_RELAY_PIN, RELAY_OFF);
@@ -715,16 +874,16 @@ readModeFromButtons(void)
 #endif // USE_BUTTON_INTERRUPTS
 
 	if (upPress) {
-		if (myPod.action == actionRaise) {
-			myPod.mode = modeOff;
+		if (myPod->action == actionRaise) {
+			myPod->mode = modeOff;
 		} else {
-			myPod.mode = modeUp;
+			myPod->mode = modeUp;
 		}
 	} else if (downPress) {
-		if (myPod.action == actionLower) {
-			myPod.mode = modeOff;
+		if (myPod->action == actionLower) {
+			myPod->mode = modeOff;
 		} else {
-			myPod.mode = modeDown;
+			myPod->mode = modeDown;
 		}
 	}
 }
@@ -755,37 +914,37 @@ readPodState(void)
 		bottom = true;
 	}
 
-	myPod.topSensor = top;
-	myPod.botSensor = bottom;
+	myPod->topSensor = top;
+	myPod->botSensor = bottom;
 
 #define ALMOST_DOWN_DELAY 2000  // 2 seconds
 #define ALMOST_UP_DELAY 5000    // 5  seconds
 	now = millis();
 	if (top) {
-		if (myPod.position == positionMiddle) {
-			myPod.position = positionAlmostDown;
+		if (myPod->position == positionMiddle) {
+			myPod->position = positionAlmostDown;
 			almostDownTime = now;
-		} else if ((myPod.position == positionAlmostDown) &&
+		} else if ((myPod->position == positionAlmostDown) &&
 			   ((almostDownTime + ALMOST_DOWN_DELAY) > now)) {
 			// Do nothing until delay passes
 		} else {
-			myPod.position = positionDown;
+			myPod->position = positionDown;
 			almostDownTime = 0;
 		}
 		almostUpTime = 0;
 	} else if (bottom) {
-		myPod.position = positionMiddle;
+		myPod->position = positionMiddle;
 		almostDownTime = 0;
 		almostUpTime = 0;
 	} else {
-		if (myPod.position == positionMiddle) {
-			myPod.position = positionAlmostUp;
+		if (myPod->position == positionMiddle) {
+			myPod->position = positionAlmostUp;
 			almostUpTime = now;
-		} else if ((myPod.position == positionAlmostUp) &&
+		} else if ((myPod->position == positionAlmostUp) &&
 			   ((almostUpTime + ALMOST_UP_DELAY) > now)) {
 			// Do nothing until delay passes
 		} else {
-			myPod.position = positionUp;
+			myPod->position = positionUp;
 			almostUpTime = 0;
 		}
 		almostDownTime = 0;
@@ -815,8 +974,8 @@ readBattery(void)
 		pct = 0;
 	}
 
-	myPod.batteryPct = pct;
-	myPod.batteryVolts = volts;
+	myPod->batteryPct = pct;
+	myPod->batteryVolts = volts;
 }
 
 
@@ -863,19 +1022,32 @@ setupWifi(bool initialConnect, unsigned int tries)
 	}
 
 	if (tries % 50 == 0) {
+		IPAddress privIP(192, 168, PRIV_WIFI_SUBNET, myPodNum); // Desired IP for the ESP32 AP
+		IPAddress privGateway(192, 168, PRIV_WIFI_SUBNET, 1); // Gateway IP (often the same as local_IP for AP)
+		IPAddress privSubnet(255, 255, 255, 0); // Subnet mask
+
 		WiFi.disconnect();
+		WiFi.softAPdisconnect();
+		WiFi.mode(WIFI_MODE_NULL);
 
-		// Set up in Station Mode - Will be connecting to an access point
-		WiFi.mode(WIFI_STA);
-		// Helps when multiple APs for our SSID
-		WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
-		WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
-
-		// Set the hostname for this Arduino
-		WiFi.hostname(myUniqueId);
-
-		// And connect to the details defined at the top
-		WiFi.begin(config.wifiSSID.c_str(), config.wifiPass.c_str());
+		if (myPodNum == 1) {
+			// Set up in AP & Station Mode
+			WiFi.mode(WIFI_AP_STA);
+			WiFi.hostname(myUniqueId);
+			WiFi.softAP(PRIV_WIFI_SSID, PRIV_WIFI_PASS);
+			WiFi.softAPConfig(privIP, privGateway, privSubnet);
+			WiFi.softAP(PRIV_WIFI_SSID, PRIV_WIFI_PASS, 1, 0, NUM_PODS - 1);
+			// Helps when multiple APs for our SSID
+			WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
+			WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
+			WiFi.begin(config.wifiSSID.c_str(), config.wifiPass.c_str());
+		} else {
+			// Set up in Station Mode - Will be connecting to an access point
+			WiFi.mode(WIFI_STA);
+			WiFi.hostname(myUniqueId);
+			WiFi.config(privIP, privGateway, privGateway, privSubnet);
+			WiFi.begin(PRIV_WIFI_SSID, PRIV_WIFI_PASS);
+		}
 
 		if (tries != 0) { // Don't change/set power the first time through.
 			switch (wifiPower) {
@@ -912,9 +1084,7 @@ checkWifiStatus(boolean initialConnect)
 {
 	static unsigned long lastWifiTry = 0;
 	static unsigned int wifiTries = 0;
-#ifdef DEBUG_OVER_SERIAL
 	static uint8_t previousWifiStatus = 0;
-#endif // DEBUG_OVER_SERIAL
 	uint8_t status;
 	boolean ret = false;
 
@@ -935,18 +1105,31 @@ checkWifiStatus(boolean initialConnect)
 		lastWifiTry = 0;
 		ret = true;
 	}
-#ifdef DEBUG_OVER_SERIAL
 	if ((status == WL_CONNECTED) && (previousWifiStatus != WL_CONNECTED)) {
+		IPAddress myIP(192, 168, PRIV_WIFI_SUBNET, myPodNum);
+		udp.begin(myIP, PRIV_UDP_PORT);
+		resendAllData = true;
+#ifdef DEBUG_OVER_SERIAL
 		Serial.print("WiFi connected, IP is ");
-		Serial.println(WiFi.localIP());
+		Serial.print(WiFi.localIP());
+		Serial.print(" : ");
+		Serial.println(WiFi.SSID());
 		byte *bssid = WiFi.BSSID();
 		sprintf(_debugOutput, "WiFi BSSID is %02X:%02X:%02X:%02X:%02X:%02X", bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
 		Serial.println(_debugOutput);
 		Serial.print("WiFi RSSI: ");
 		Serial.println(WiFi.RSSI());
+		if (myPodNum == 1) {
+			Serial.print("softAP IP address: ");
+			Serial.print(WiFi.softAPIP());
+			Serial.print(" : ");
+			Serial.print(WiFi.softAPSubnetMask());
+			Serial.print(" : ");
+			Serial.println(WiFi.softAPSSID());
+		}
+#endif // DEBUG_OVER_SERIAL
 	}
 	previousWifiStatus = status;
-#endif // DEBUG_OVER_SERIAL
 
 	return ret;
 }
@@ -1120,7 +1303,7 @@ updateDisplayInfo()
 	{
 		const char *mode, *action, *position;
 
-		switch (myPod.mode) {
+		switch (myPod->mode) {
 		case modeUp:
 			mode = "Up  ";
 			break;
@@ -1134,7 +1317,7 @@ updateDisplayInfo()
 			mode = "XXXX";
 			break;
 		}
-		switch (myPod.action) {
+		switch (myPod->action) {
 		case actionStop:
 			action = "Stop ";
 			break;
@@ -1148,7 +1331,7 @@ updateDisplayInfo()
 			action = "XXXXX";
 			break;
 		}
-		switch (myPod.position) {
+		switch (myPod->position) {
 		case positionUp:
 			position = "Up   ";
 			break;
@@ -1171,8 +1354,18 @@ updateDisplayInfo()
 		snprintf(line2, sizeof(line2), "%s : %s : %s", mode, action, position);  // 4 + 3 + 5 + 3 + 5
 	}
 
-	// Get battery info for line 3
-	snprintf(line3, sizeof(line3), "Bat: %d%%  %0.02fV", myPod.batteryPct, myPod.batteryVolts);
+	// Get Pod status info for line 3
+	if (myPodNum == 1) {
+		int activePeers = 0;
+		for (int podNum = 1; podNum <= NUM_PODS; podNum++) {
+			if (POD_DATA_IS_FRESH(podNum)) {
+				activePeers++;
+			}
+		}
+		snprintf(line3, sizeof(line3), "Pod 1: peers %d/%u", activePeers, WiFi.softAPgetStationNum());
+	} else {
+		snprintf(line3, sizeof(line3), "Pod %d", myPodNum);
+	}
 
 	if (dbgIdx < 1) {
 		snprintf(line4, sizeof(line4), "ID: %s", myUniqueId);
@@ -1209,6 +1402,14 @@ updateDisplayInfo()
 		snprintf(line4, sizeof(line4), "Uptime: %lu", getUptimeSeconds());
 		dbgIdx = 9;
 #endif // DEBUG_UPTIME
+#ifdef DEBUG_UDP
+	} else if (dbgIdx < 10) {
+		snprintf(line4, sizeof(line4), "UDP: S=%u/%u  R=%u", udpPacketsSent, udpPacketsSentErrors, udpPacketsReceived);
+		dbgIdx = 10;
+#endif // DEBUG_UDP
+	} else if (dbgIdx < 11) {
+		snprintf(line4, sizeof(line4), "Bat: %d%%  %0.02fV", myPod->batteryPct, myPod->batteryVolts);
+		dbgIdx = 11;
 	} else { // Must be last
 		snprintf(line4, sizeof(line4), "Version: %s", _version);
 		dbgIdx = 0;
@@ -1308,83 +1509,64 @@ lookupEntity(mqttEntityId entityId)
 	return NULL;
 }
 
-boolean
-readEntity(mqttState *singleEntity, char *value)
+void
+readEntity(mqttState *singleEntity, char *value, int podIdx)
 {
-	boolean result = false;
-
 	value[0] = 0;
 
 	switch (singleEntity->entityId) {
 	case mqttEntityId::entityBatPct:
-		sprintf(value, "%d", myPod.batteryPct);
-		result = true;
+		sprintf(value, "%d", pods[podIdx].batteryPct);
 		break;
 	case mqttEntityId::entityBatVlt:
-		sprintf(value, "%0.02f", myPod.batteryVolts);
-		result = true;
+		sprintf(value, "%0.02f", pods[podIdx].batteryVolts);
 		break;
 	case mqttEntityId::entityTopSensor:
-		sprintf(value, "%s", myPod.topSensor ? "Wet" : "Dry");
-		result = true;
+		sprintf(value, "%s", pods[podIdx].topSensor ? "Wet" : "Dry");
 		break;
 	case mqttEntityId::entityBotSensor:
-		sprintf(value, "%s", myPod.botSensor ? "Wet" : "Dry");
-		result = true;
+		sprintf(value, "%s", pods[podIdx].botSensor ? "Wet" : "Dry");
 		break;
 #ifdef DEBUG_CALLBACKS
 	case mqttEntityId::entityCallbacks:
 		sprintf(value, "%lu", receivedCallbacks);
-		result = true;
 		break;
 #endif // DEBUG_CALLBACKS
 #ifdef DEBUG_FREEMEM
 	case mqttEntityId::entityFreemem:
 		sprintf(value, "%lu", freeMemory());
-		result = true;
 		break;
 #endif // DEBUG_FREEMEM
 #ifdef DEBUG_UPTIME
 	case mqttEntityId::entityUptime:
 		sprintf(value, "%lu", getUptimeSeconds());
-		result = true;
 		break;
 #endif // DEBUG_UPTIME
 	case mqttEntityId::entityVersion:
-		sprintf(value, "%s", _version);
-		result = true;
+		sprintf(value, "%s", pods[podIdx].version);
 		break;
 #ifdef DEBUG_WIFI
 	case mqttEntityId::entityRSSI:
 		sprintf(value, "%d", WiFi.RSSI());
-		result = true;
 		break;
 	case mqttEntityId::entityBSSID:
 		{
 			byte *bssid = WiFi.BSSID();
 			sprintf(value, "%02X:%02X:%02X:%02X:%02X:%02X", bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
 		}
-		result = true;
 		break;
 	case mqttEntityId::entityTxPower:
 		sprintf(value, "%0.1f", (float)WiFi.getTxPower() / 4.0);
-		result = true;
 		break;
 	case mqttEntityId::entityWifiRecon:
 		sprintf(value, "%lu", wifiReconnects);
-		result = true;
 		break;
 #endif // DEBUG_WIFI
 	}
 
-#ifdef DEBUG_OVER_SERIAL
-	if (!result) {
-		snprintf(_debugOutput, sizeof(_debugOutput), "Failed to read register: %s, Result = %d", singleEntity->mqttName, result);
-		Serial.println(_debugOutput);
+	if (singleEntity->allPods && !POD_DATA_IS_FRESH(podIdx + 1)) {
+		strcpy(value, "unavailable");
 	}
-#endif
-
-	return result;
 }
 
 /*
@@ -1393,17 +1575,16 @@ readEntity(mqttState *singleEntity, char *value)
  * Query the handled entity in the usual way, and add the cleansed output to the buffer
  */
 boolean
-addState(mqttState *singleEntity)
+addState(mqttState *singleEntity, int podIdx)
 {
 	char response[MAX_FORMATTED_DATA_VALUE_LENGTH];
 	boolean result;
 
 	// Read the register(s)/data
-	result = readEntity(singleEntity, &response[0]);
+	readEntity(singleEntity, &response[0], podIdx);
 
-	if (result) {
-		result = addToPayload(response);
-	}
+	result = addToPayload(response);
+
 	return result;
 }
 
@@ -1423,10 +1604,16 @@ sendStatus(void)
 }
 
 boolean
-addConfig(mqttState *singleEntity)
+addConfig(mqttState *singleEntity, int podIdx)
 {
 	char stateAddition[1024] = "";
-	char prettyName[64];
+	char prettyName[MAX_MQTT_NAME_LENGTH], mqttName[MAX_MQTT_NAME_LENGTH];
+
+	if (singleEntity->allPods) {
+		snprintf(mqttName, sizeof(mqttName), "Pod%d_%s", podIdx + 1, singleEntity->mqttName);
+	} else {
+		strlcpy(mqttName, singleEntity->mqttName, sizeof(mqttName));
+	}
 
 	sprintf(stateAddition, "{");
 	if (!addToPayload(stateAddition)) {
@@ -1461,7 +1648,7 @@ addConfig(mqttState *singleEntity)
 		return false;
 	}
 
-	strlcpy(prettyName, singleEntity->mqttName, sizeof(prettyName));
+	strlcpy(prettyName, mqttName, sizeof(prettyName));
 	while(char *ch = strchr(prettyName, '_')) {
 		*ch = ' ';
 	}
@@ -1470,7 +1657,7 @@ addConfig(mqttState *singleEntity)
 		return false;
 	}
 
-	snprintf(stateAddition, sizeof(stateAddition), ", \"unique_id\": \"%s_%s\"", myUniqueId, singleEntity->mqttName);
+	snprintf(stateAddition, sizeof(stateAddition), ", \"unique_id\": \"%s_%s\"", myUniqueId, mqttName);
 	if (!addToPayload(stateAddition)) {
 		return false;
 	}
@@ -1592,8 +1779,8 @@ addConfig(mqttState *singleEntity)
 	switch (singleEntity->entityId) {
 	default:
 		snprintf(stateAddition, sizeof(stateAddition),
-			", \"state_topic\": \"" DEVICE_NAME "/%s/%s/state\"",
-			myUniqueId, singleEntity->mqttName);
+			 ", \"state_topic\": \"" DEVICE_NAME "/%s/%s/state\"",
+			 myUniqueId, mqttName);
 		break;
 	}
 	if (!addToPayload(stateAddition)) {
@@ -1602,7 +1789,7 @@ addConfig(mqttState *singleEntity)
 
 	if (singleEntity->subscribe) {
 		sprintf(stateAddition, ", \"command_topic\": \"" DEVICE_NAME "/%s/%s/command\"",
-			myUniqueId, singleEntity->mqttName);
+			myUniqueId, mqttName);
 		if (!addToPayload(stateAddition)) {
 			return false;
 		}
@@ -1663,40 +1850,53 @@ sendDataFromMqttState(mqttState *singleEntity, bool doHomeAssistant)
 {
 	char topic[256];
 	boolean result;
+	int loopCount;
 
 	if (singleEntity == NULL)
 		return;
 
-	emptyPayload();
+	loopCount = singleEntity->allPods ? NUM_PODS : 1;
+	for (int podIdx = 0; podIdx < loopCount; podIdx++) {
+		int podNum = podIdx + 1;
+		emptyPayload();
 
-	if (doHomeAssistant) {
-		const char *entityType;
-		switch (singleEntity->haClass) {
-		case homeAssistantClass::haClassBox:
-//		case homeAssistantClass::haClassNumber:
-			entityType = "number";
-			break;
-//		case homeAssistantClass::haClassSelect:
-//			entityType = "select";
-//		break;
-		case homeAssistantClass::haClassMoisture:
-			entityType = "binary_sensor";
-		break;
-		default:
-			entityType = "sensor";
-			break;
+		if (doHomeAssistant) {
+			const char *entityType;
+			switch (singleEntity->haClass) {
+			case homeAssistantClass::haClassBox:
+//			case homeAssistantClass::haClassNumber:
+				entityType = "number";
+				break;
+//			case homeAssistantClass::haClassSelect:
+//				entityType = "select";
+//			break;
+			case homeAssistantClass::haClassMoisture:
+				entityType = "binary_sensor";
+				break;
+			default:
+				entityType = "sensor";
+				break;
+			}
+
+			if (singleEntity->allPods) {
+				snprintf(topic, sizeof(topic), "homeassistant/%s/%s/Pod%d_%s/config", entityType, myUniqueId, podNum, singleEntity->mqttName);
+			} else {
+				snprintf(topic, sizeof(topic), "homeassistant/%s/%s/%s/config", entityType, myUniqueId, singleEntity->mqttName);
+			}
+			result = addConfig(singleEntity, podIdx);
+		} else {
+			if (singleEntity->allPods) {
+				snprintf(topic, sizeof(topic), DEVICE_NAME "/%s/Pod%d_%s/state", myUniqueId, podNum, singleEntity->mqttName);
+			} else {
+				snprintf(topic, sizeof(topic), DEVICE_NAME "/%s/%s/state", myUniqueId, singleEntity->mqttName);
+			}
+			result = addState(singleEntity, podIdx);
 		}
 
-		snprintf(topic, sizeof(topic), "homeassistant/%s/%s/%s/config", entityType, myUniqueId, singleEntity->mqttName);
-		result = addConfig(singleEntity);
-	} else {
-		snprintf(topic, sizeof(topic), DEVICE_NAME "/%s/%s/state", myUniqueId, singleEntity->mqttName);
-		result = addState(singleEntity);
-	}
-
-	if (result) {
-		// And send
-		sendMqtt(topic, singleEntity->retain ? MQTT_RETAIN : false);
+		if (result) {
+			// And send
+			sendMqtt(topic, singleEntity->retain ? MQTT_RETAIN : false);
+		}
 	}
 }
 

@@ -65,6 +65,12 @@ Author:		David Carrel
 // Display parameters
 #define USE_DISPLAY
 
+// Subnet for private WiFi (192.168.PRIV_SUBNET.x)
+#define PRIV_WIFI_SUBNET 237
+#define PRIV_WIFI_SSID "V-Lift"
+#define PRIV_WIFI_PASS "RZtXCLqHNVJKPopiBh3Z"
+#define PRIV_UDP_PORT 9124
+
 // Set this to true to set the "retain" flag when publishing to MQTT
 // "retain" is also a flag in mqttState.   This is AND-ed with that.
 // This does NOT control whether we tell HA to add "retain" to command topics that it publishes back to us.
@@ -88,7 +94,8 @@ Author:		David Carrel
 //#define DEBUG_WIFI		// Enable extra debug for WiFi
 //#define DEBUG_CALLBACKS	// Enable extra debug MQTT callbacks
 //#define DEBUG_UPTIME
-#define DEBUG_ZIGBEE
+//#define DEBUG_ZIGBEE
+#define DEBUG_UDP
 
 // The device name is used as the MQTT base topic and presence on the network.
 #define DEVICE_NAME "VLift"
@@ -96,6 +103,8 @@ Author:		David Carrel
 /*************************************************/
 /* Shouldn't need to change anything below this. */
 /*************************************************/
+
+#define VERSION_STR_LEN 6
 
 #define uS_TO_S_FACTOR 1000000
 
@@ -163,6 +172,7 @@ struct mqttState
 {
 	mqttEntityId entityId;
 	char mqttName[MAX_MQTT_NAME_LENGTH];
+	bool allPods;
 	bool subscribe;
 	bool retain;
 	homeAssistantClass haClass;
@@ -192,7 +202,7 @@ enum liftPositions {
 };
 
 struct podState {
-	int                     podNum = -1;
+	unsigned long		lastUpdate;
 	enum liftModes          mode = modeOff;
 	enum liftActions	action;
 	enum liftPositions	position;
@@ -200,6 +210,7 @@ struct podState {
 	float                   batteryVolts;
 	boolean                 topSensor;
 	boolean                 botSensor;
+	char			version[VERSION_STR_LEN];
 };
 
 // Config handling                                                                                                                                                                      
