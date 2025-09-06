@@ -33,7 +33,7 @@ Author:		David Carrel
 void setButtonLEDs(int freq = 0);
 
 // Device parameters
-char _version[VERSION_STR_LEN] = "v1.09";
+char _version[VERSION_STR_LEN] = "v1.10";
 char myUniqueId[17];
 char statusTopic[128];
 
@@ -510,6 +510,8 @@ loop ()
 			if (!mqttIsOn || !_mqtt.loop()) {
 				mqttIsOn = setupMqtt();
 			}
+		} else {
+			mqttIsOn = false;
 		}
 	}
 
@@ -534,8 +536,11 @@ loop ()
 		getSystemModeFromNumberOne();
 	}
 	myPod->mode = pods[0].mode;
-	setPodAction();		// Set myPod->action
-	engagePodAction();	// activate relays
+	// On remote pods, try waiting for state from #1 before activating the bootup default
+	if ((myPodNum == 1) || pods[0].lastUpdate || (getUptimeSeconds() > 120)) {
+		setPodAction();		// Set myPod->action
+		engagePodAction();	// activate relays
+	}
 
 	if (resendAllData) {
 		// Read and transmit all entity & HA data to MQTT
@@ -547,12 +552,10 @@ loop ()
 	if (myPodNum == 1) {
 		setButtonLEDs();
 
-		if (wifiIsOn) {
-			getRemotePodStatus();
-		}
+		getRemotePodStatus();
 
 		// Send status/keepalive
-		if (wifiIsOn && checkTimer(&lastRunPodData, POD2POD_DATA_INTERVAL)) {
+		if (checkTimer(&lastRunPodData, POD2POD_DATA_INTERVAL)) {
 			sendCommandsToRemotePods();
 		}
 
@@ -1100,10 +1103,6 @@ setupWifi(bool initialConnect, unsigned int tries)
 	}
 #endif // DEBUG_WIFI
 
-	if (tries == 5000) {
-		ESP.restart();
-	}
-
 	if (tries % 50 == 0) {
 		IPAddress privIP(192, 168, PRIV_WIFI_SUBNET, myPodNum); // Desired IP for the ESP32 AP
 		IPAddress privGateway(192, 168, PRIV_WIFI_SUBNET, 1); // Gateway IP (often the same as local_IP for AP)
@@ -1171,7 +1170,8 @@ checkWifiStatus(boolean initialConnect)
 	uint8_t status;
 	boolean ret = false;
 
-        if (initialConnect || (WiFi.status() != WL_CONNECTED)) {
+	status = WiFi.status();
+	if (initialConnect || (status != WL_CONNECTED)) {
 		if (checkTimer(&lastWifiTry, WIFI_RECONNECT_INTERVAL)) {
 			setupWifi(initialConnect, wifiTries);
 #ifdef DEBUG_OVER_SERIAL
@@ -1182,8 +1182,7 @@ checkWifiStatus(boolean initialConnect)
 		}
 	}
 
-	status = WiFi.status();
-        if (status == WL_CONNECTED) {
+	if (status == WL_CONNECTED) {
 		wifiTries = 0;
 		lastWifiTry = 0;
 		ret = true;
@@ -1286,18 +1285,14 @@ updateOLED(bool justStatus, const char* line2, const char* line3, const char* li
 	rssi = WiFi.RSSI();
 	// There's 20 characters we can play with, width wise.
 	{
-		char wifiStatus, mqttStatus, zigbeeStatus;
+		char wifiStatus, mqttStatus, oneStatus;
 
-		wifiStatus = mqttStatus = zigbeeStatus = ' ';
-#ifdef USE_ZIGBEE
-		if (zigbeeActive) {
-			zigbeeStatus = 'Z';
-		}
-#endif // USE_ZIGBEE
+		wifiStatus = mqttStatus = ' ';
+		oneStatus = POD_DATA_IS_FRESH(0) ? '1' : ' ';
 		wifiStatus = WiFi.status() == WL_CONNECTED ? 'W' : ' ';
 		mqttStatus = _mqtt.connected() && _mqtt.loop() ? 'M' : ' ';
 		snprintf(line1, sizeof(line1), "Lift %c%c%c%c        %3hhd",
-			 _oledOperatingIndicator, wifiStatus, mqttStatus, zigbeeStatus, rssi);
+			 _oledOperatingIndicator, wifiStatus, mqttStatus, oneStatus, rssi);
 	}
 	_display.println(line1);
 	printWifiBars(rssi);
