@@ -33,7 +33,7 @@ Author:		David Carrel
 void setButtonLEDs(int freq = 0);
 
 // Device parameters
-char _version[VERSION_STR_LEN] = "v1.07";
+char _version[VERSION_STR_LEN] = "v1.08";
 char myUniqueId[17];
 char statusTopic[128];
 
@@ -110,10 +110,14 @@ static struct mqttState _mqttAllEntities[] =
 	{ mqttEntityId::entityUptime,             "Uptime",            false, false, false, homeAssistantClass::haClassDuration },
 #endif // DEBUG_UPTIME
 	{ mqttEntityId::entityVersion,            "Version",           true,  false, true,  homeAssistantClass::haClassInfo },
-	{ mqttEntityId::entityBatPct,             "Battery",           true,  false, true,  homeAssistantClass::haClassBattery },
-	{ mqttEntityId::entityBatVlt,             "Battery_Voltage",   false, false, true,  homeAssistantClass::haClassVoltage },
-	{ mqttEntityId::entityTopSensor,          "Top_Sensor",        true,  false, true,  homeAssistantClass::haClassMoisture },
-	{ mqttEntityId::entityBotSensor,          "Bottom_Sensor",     true,  false, true,  homeAssistantClass::haClassMoisture }
+	{ mqttEntityId::entitySystemMode,         "System_Mode",       false, true,  true,  homeAssistantClass::haClassSelect },
+	{ mqttEntityId::entityPodMode,            "Mode",              true,  false, true,  homeAssistantClass::haClassInfo },
+	{ mqttEntityId::entityPodAction,          "Action",            true,  false, true,  homeAssistantClass::haClassInfo },
+	{ mqttEntityId::entityPodPosition,        "Position",          true,  false, true,  homeAssistantClass::haClassInfo },
+	{ mqttEntityId::entityPodBatPct,          "Battery",           true,  false, true,  homeAssistantClass::haClassBattery },
+	{ mqttEntityId::entityPodBatVlt,          "Battery_Voltage",   false, false, true,  homeAssistantClass::haClassVoltage },
+	{ mqttEntityId::entityPodTopSensor,       "Top_Sensor",        true,  false, true,  homeAssistantClass::haClassMoisture },
+	{ mqttEntityId::entityPodBotSensor,       "Bottom_Sensor",     true,  false, true,  homeAssistantClass::haClassMoisture }
 };
 
 // These timers are used in the main loop.
@@ -524,6 +528,7 @@ loop ()
 
 	// MQTT/Zigbee might have asynchronously updated pods[0].mode
 	if (myPodNum == 1) {
+		pods[0].batteryVolts = pods[1].batteryVolts;  // DAVE - hack.  Clean up
 		readSystemModeFromButtons();  // Set system (pods[0]) mode based on buttons and system action
 	} else {
 		getSystemModeFromNumberOne();
@@ -735,11 +740,31 @@ getRemotePodStatus (void)
 			podNum = parseInt(buf, "PN=");
 			if (podNum > 1 && podNum <= NUM_PODS) {
 				pods[podNum].batteryPct = parseInt(buf, "BP=");
-				pods[podNum].mode = (liftModes)parseInt(buf, "MO=");
-				pods[podNum].action = (liftActions)parseInt(buf, "AC=");
-				pods[podNum].position = (liftPositions)parseInt(buf, "PO=");
-				pods[podNum].topSensor = parseBool(buf, "TS=");
-				pods[podNum].botSensor = parseBool(buf, "BS=");
+				{
+					liftModes mode = (liftModes)parseInt(buf, "MO=");
+					if (mode != pods[podNum].mode) resendAllData = true;
+					pods[podNum].mode = mode;
+				}
+				{
+					liftActions action = (liftActions)parseInt(buf, "AC=");
+					if (action != pods[podNum].action) resendAllData = true;
+					pods[podNum].action = action;
+				}
+				{
+					liftPositions position = (liftPositions)parseInt(buf, "PO=");
+					if (position != pods[podNum].position) resendAllData = true;
+					pods[podNum].position = position;
+				}
+				{
+					bool ts = parseBool(buf, "TS=");
+					if (ts != pods[podNum].topSensor) resendAllData = true;
+					pods[podNum].topSensor = ts;
+				}
+				{
+					bool bs = parseBool(buf, "BS=");
+					if (bs != pods[podNum].botSensor) resendAllData = true;
+					pods[podNum].botSensor = bs;
+				}
 				parseStr(buf, "VV=", pods[podNum].version, sizeof(pods[podNum].version));
 				pods[podNum].lastUpdate = millis();
 			}
@@ -1570,19 +1595,65 @@ lookupEntity(mqttEntityId entityId)
 void
 readEntity(mqttState *singleEntity, char *value, int podNum)
 {
-	strcpy(value, "unknown");
+	strcpy(value, "Unknown");
 
 	switch (singleEntity->entityId) {
-	case mqttEntityId::entityBatPct:
+	case mqttEntityId::entitySystemMode:
+	case mqttEntityId::entityPodMode:
+		switch (pods[podNum].mode) {
+		case modeUp:
+			strcpy(value, "Up");
+			break;
+		case modeDown:
+			strcpy(value, "Down");
+			break;
+		case modeOff:
+			strcpy(value, "Off");
+			break;
+		}
+		break;
+	case mqttEntityId::entityPodAction:
+		switch (pods[podNum].action) {
+		case actionStop:
+			strcpy(value, "Stop");
+			break;
+		case actionRaise:
+			strcpy(value, "Raise");
+			break;
+		case actionLower:
+			strcpy(value, "Lower");
+			break;
+		}
+		break;
+	case mqttEntityId::entityPodPosition:
+		switch (pods[podNum].position) {
+		case positionUp:
+			strcpy(value, "Up");
+			break;
+		case positionAlmostUp:
+			strcpy(value, "Almost Up");
+			break;
+		case positionMiddle:
+			strcpy(value, "Middle");
+			break;
+		case positionAlmostDown:
+			strcpy(value, "Almost Down");
+			break;
+		case positionDown:
+			strcpy(value, "Down");
+			break;
+		}
+		break;
+	case mqttEntityId::entityPodBatPct:
 		sprintf(value, "%d", pods[podNum].batteryPct);
 		break;
-	case mqttEntityId::entityBatVlt:
+	case mqttEntityId::entityPodBatVlt:
 		sprintf(value, "%0.02f", pods[podNum].batteryVolts);
 		break;
-	case mqttEntityId::entityTopSensor:
+	case mqttEntityId::entityPodTopSensor:
 		sprintf(value, "%s", pods[podNum].topSensor ? "Wet" : "Dry");
 		break;
-	case mqttEntityId::entityBotSensor:
+	case mqttEntityId::entityPodBotSensor:
 		sprintf(value, "%s", pods[podNum].botSensor ? "Wet" : "Dry");
 		break;
 #ifdef DEBUG_CALLBACKS
@@ -1683,9 +1754,9 @@ addConfig(mqttState *singleEntity, int podNum)
 //	case homeAssistantClass::haClassNumber:
 		sprintf(stateAddition, "\"component\": \"number\"");
 		break;
-//	case homeAssistantClass::haClassSelect:
-//		sprintf(stateAddition, "\"component\": \"select\"");
-//		break;
+	case homeAssistantClass::haClassSelect:
+		sprintf(stateAddition, "\"component\": \"select\"");
+		break;
 	case homeAssistantClass::haClassMoisture:
 		sprintf(stateAddition, "\"component\": \"binary_sensor\"");
 		break;
@@ -1766,11 +1837,11 @@ addConfig(mqttState *singleEntity, int podNum)
 		snprintf(stateAddition, sizeof(stateAddition),
 			 ", \"entity_category\": \"diagnostic\"");
 		break;
-//	case homeAssistantClass::haClassSelect:
-//		snprintf(stateAddition, sizeof(stateAddition),
-//			 ", \"device_class\": \"enum\""
-//			);
-//		break;
+	case homeAssistantClass::haClassSelect:
+		snprintf(stateAddition, sizeof(stateAddition),
+			 ", \"device_class\": \"enum\""
+			);
+		break;
 //	case homeAssistantClass::haClassNumber:
 //		snprintf(stateAddition, sizeof(stateAddition),
 //			 ", \"entity_category\": \"diagnostic\""
@@ -1787,7 +1858,17 @@ addConfig(mqttState *singleEntity, int podNum)
 	}
 
 	switch (singleEntity->entityId) {
-	case mqttEntityId::entityBatVlt:
+	case mqttEntityId::entitySystemMode:
+		snprintf(stateAddition, sizeof(stateAddition),
+			 ", \"icon\": \"mdi:swap-vertical-bold\""
+			 ", \"options\": [ \"Up\", \"Down\", \"Off\" ]");
+		break;
+	case mqttEntityId::entityPodMode:
+	case mqttEntityId::entityPodAction:
+	case mqttEntityId::entityPodPosition:
+		sprintf(stateAddition, ", \"icon\": \"mdi:swap-vertical-bold\"");
+		break;
+	case mqttEntityId::entityPodBatVlt:
 		sprintf(stateAddition,
 			", \"icon\": \"mdi:battery-heart\""
 			", \"suggested_display_precision\": 2");
@@ -1814,9 +1895,9 @@ addConfig(mqttState *singleEntity, int podNum)
 #ifdef DEBUG_UPTIME
 	case mqttEntityId::entityUptime:
 #endif // DEBUG_UPTIME
-	case mqttEntityId::entityBatPct:
-	case mqttEntityId::entityTopSensor:
-	case mqttEntityId::entityBotSensor:
+	case mqttEntityId::entityPodBatPct:
+	case mqttEntityId::entityPodTopSensor:
+	case mqttEntityId::entityPodBotSensor:
 		// Use default icon
 		strcpy(stateAddition, "");
 		break;
@@ -1908,13 +1989,14 @@ sendDataFromMqttState(mqttState *singleEntity, bool doHomeAssistant)
 {
 	char topic[256];
 	boolean result;
-	int loopCount;
+	int loopStart, loopLast;
 
 	if (singleEntity == NULL)
 		return;
 
-	loopCount = singleEntity->allPods ? NUM_PODS : 1;
-	for (int podNum = 1; podNum <= loopCount; podNum++) {
+	loopStart = singleEntity->allPods ? 1 : 0;
+	loopLast =  singleEntity->allPods ? NUM_PODS : 0;
+	for (int podNum = loopStart; podNum <= loopLast; podNum++) {
 		emptyPayload();
 
 		if (doHomeAssistant) {
@@ -1924,9 +2006,9 @@ sendDataFromMqttState(mqttState *singleEntity, bool doHomeAssistant)
 //			case homeAssistantClass::haClassNumber:
 				entityType = "number";
 				break;
-//			case homeAssistantClass::haClassSelect:
-//				entityType = "select";
-//			break;
+			case homeAssistantClass::haClassSelect:
+				entityType = "select";
+			break;
 			case homeAssistantClass::haClassMoisture:
 				entityType = "binary_sensor";
 				break;
@@ -2032,12 +2114,15 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 	// Update system!!!
 	{
 //		int32_t singleInt32 = -1;
-//		char *singleString;
+		char *singleString;
 //		char *endPtr = NULL;
 		bool valueProcessingError = false;
 
 		// First, process value.
 		switch (mqttEntity->entityId) {
+		case mqttEntityId::entitySystemMode:
+			singleString = mqttIncomingPayload;
+			break;
 		default:
 #ifdef DEBUG_OVER_SERIAL
 			sprintf(_debugOutput, "Trying to update an unhandled entity! %d", mqttEntity->entityId);
@@ -2061,6 +2146,20 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 		} else {
 			// Now set the value and take appropriate action(s)
 			switch (mqttEntity->entityId) {
+			case mqttEntityId::entitySystemMode:
+				if (!strncmp(singleString, "Up", 3)) {
+					pods[0].mode = liftModes::modeUp;
+				} else if (!strncmp(singleString, "Down", 5)) {
+					pods[0].mode = liftModes::modeDown;
+				} else if (!strncmp(singleString, "Off", 4)) {
+					pods[0].mode = liftModes::modeOff;
+#ifdef DEBUG_CALLBACKS
+				} else {
+					badCallbacks++;
+#endif // DEBUG_CALLBACKS
+				}
+				resendAllData = true;
+				break;
 			default:
 #ifdef DEBUG_OVER_SERIAL
 				sprintf(_debugOutput, "Trying to write an unhandled entity! %d", mqttEntity->entityId);

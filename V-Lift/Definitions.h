@@ -141,10 +141,14 @@ enum mqttEntityId {
 	entityZigSignalStrength,
 #endif // USE_ZIGBEE && DEBUG_ZIGBEE
 	entityVersion,
-	entityBatPct,
-	entityBatVlt,
-	entityTopSensor,
-	entityBotSensor
+	entitySystemMode,
+	entityPodMode,
+	entityPodAction,
+	entityPodPosition,
+	entityPodBatPct,
+	entityPodBatVlt,
+	entityPodTopSensor,
+	entityPodBotSensor
 };
 
 enum mqttUpdateFreq {
@@ -162,7 +166,7 @@ enum homeAssistantClass {
 	haClassVoltage,
 	haClassDuration,
 	haClassInfo,
-//	haClassSelect,
+	haClassSelect,
 	haClassBox,
 //	haClassNumber
 };
