@@ -33,7 +33,7 @@ Author:		David Carrel
 void setButtonLEDs(int freq = 0);
 
 // Device parameters
-char _version[VERSION_STR_LEN] = "v1.08";
+char _version[VERSION_STR_LEN] = "v1.09";
 char myUniqueId[17];
 char statusTopic[128];
 
@@ -136,7 +136,7 @@ static struct mqttState _mqttAllEntities[] =
 #define DATA_INTERVAL STATUS_INTERVAL_THIRTY_SECONDS
 #define POD2POD_DATA_INTERVAL STATUS_INTERVAL_FIVE_SECONDS
 
-#define POD_DATA_IS_FRESH(_podNum) ((pods[_podNum].lastUpdate != 0) && (millis() - pods[_podNum].lastUpdate) < (4 * DATA_INTERVAL))
+#define POD_DATA_IS_FRESH(_podNum) ((pods[_podNum].lastUpdate != 0) && (millis() - pods[_podNum].lastUpdate) < (4 * POD2POD_DATA_INTERVAL))
 
 #ifdef USE_DISPLAY
 // Pins GPIO22 and GPIO21 (SCL/SDA) if ESP32
@@ -1445,7 +1445,7 @@ updateDisplayInfo()
 				activePeers++;
 			}
 		}
-		snprintf(line3, sizeof(line3), "Pod 1: peers %d/%u", activePeers, WiFi.softAPgetStationNum());
+		snprintf(line3, sizeof(line3), "Pod 1: peers %d/%u/%d", activePeers, WiFi.softAPgetStationNum() + 1, NUM_PODS);
 	} else {
 		snprintf(line3, sizeof(line3), "Pod %d", myPodNum);
 	}
@@ -1527,7 +1527,15 @@ setupMqtt(void)
 #endif
 
 	// Attempt to connect
-	if (_mqtt.connect(myUniqueId, config.mqttUser.c_str(), config.mqttPass.c_str(), statusTopic, 0, true, "offline", cleanSession)) {
+	char lwt[256];
+	strcpy(lwt, "{ \"systemStatus\": \"offline\"");
+	for (int podNum = 1; podNum <= NUM_PODS; podNum++) {
+		char podLwt[32];
+		sprintf(podLwt, ", \"pod%dStatus\": \"unavailable\"", podNum);
+		strlcat(lwt, podLwt, sizeof(lwt));
+	}
+	strlcat(lwt, " }", sizeof(lwt));
+	if (_mqtt.connect(myUniqueId, config.mqttUser.c_str(), config.mqttPass.c_str(), statusTopic, 0, true, lwt, cleanSession)) {
 		int numberOfEntities = sizeof(_mqttAllEntities) / sizeof(struct mqttState);
 #ifdef DEBUG_OVER_SERIAL
 		Serial.println("Connected MQTT");
@@ -1720,11 +1728,18 @@ addState(mqttState *singleEntity, int podNum)
 void
 sendStatus(void)
 {
-	char stateAddition[128] = "";
+	char stateAddition[512] = "";
 
 	emptyPayload();
 
-	snprintf(stateAddition, sizeof(stateAddition), "online");
+	snprintf(stateAddition, sizeof(stateAddition), "{ \"systemStatus\": \"online\"");
+	for (int podNum = 1; podNum <= NUM_PODS; podNum++) {
+		char moreState[32];
+		snprintf(moreState, sizeof(moreState), ", \"pod%dStatus\": \"%s\"", podNum,
+			 POD_DATA_IS_FRESH(podNum) ? "online" : "offline");
+		strlcat(stateAddition, moreState, sizeof(stateAddition));
+	}
+	strlcat(stateAddition, " }", sizeof(stateAddition));
 	if (!addToPayload(stateAddition)) {
 		return;
 	}
@@ -1934,7 +1949,15 @@ addConfig(mqttState *singleEntity, int podNum)
 		}
 	}
 
-	snprintf(stateAddition, sizeof(stateAddition), ", \"availability_topic\": \"%s\"", statusTopic);
+	if (singleEntity->allPods) {
+		snprintf(stateAddition, sizeof(stateAddition),
+			 ", \"availability_template\": \"{{ \\\"online\\\" if value_json.pod%dStatus == \\\"online\\\" else \\\"offline\\\" }}\""
+			 ", \"availability_topic\": \"%s\"", podNum, statusTopic);
+	} else {
+		snprintf(stateAddition, sizeof(stateAddition),
+			 ", \"availability_template\": \"{{ value_json.systemStatus | default(\\\"\\\") }}\""
+			 ", \"availability_topic\": \"%s\"", statusTopic);
+	}
 	if (!addToPayload(stateAddition)) {
 		return false;
 	}
