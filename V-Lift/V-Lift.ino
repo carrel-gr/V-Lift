@@ -14,6 +14,9 @@ Author:		David Carrel
 #include <Arduino.h>
 #include <driver/rtc_io.h>
 #include <WiFi.h>
+#ifdef USE_SSL
+#include <WiFiClientSecure.h>
+#endif // USE_SSL
 #include <NetworkUdp.h>
 #include <WebServer.h>
 #ifndef MP_XIAO_ESP32C6
@@ -33,7 +36,7 @@ Author:		David Carrel
 void setButtonLEDs(int freq = 0);
 
 // Device parameters
-char _version[VERSION_STR_LEN] = "v1.11";
+char _version[VERSION_STR_LEN] = "v1.12";
 char myUniqueId[17];
 char statusTopic[128];
 
@@ -42,7 +45,12 @@ podState *myPod;
 podState pods[NUM_PODS + 1];  // 0 is (virtual) system
 
 // WiFi parameters
+#ifdef USE_SSL
+WiFiClientSecure _wifi;
+const char* root_ca = ROOT_CA;
+#else // USE_SSL
 WiFiClient _wifi;
+#endif // USE_SSL
 wifi_power_t wifiPower = WIFI_POWER_11dBm; // Will bump to max before setting
 
 // MQTT parameters
@@ -265,6 +273,9 @@ void setup()
 	checkWifiStatus(true);
 
 	if (myPodNum == 1) {
+#ifdef USE_SSL
+		_wifi.setCACert(root_ca);
+#endif // USE_SSL
 		// Configure MQTT to the address and port specified above
 		_mqtt.setServer(config.mqttSrvr.c_str(), config.mqttPort);
 		_mqtt.setBufferSize(MAX_MQTT_PAYLOAD_SIZE + MQTT_HEADER_SIZE);
@@ -399,7 +410,11 @@ configHandler(void)
 	WiFiManagerParameter p_lineBreak_text("<p>MQTT settings:</p>");
 	WiFiManagerParameter custom_mqtt_server("server", "MQTT server", config.mqttSrvr.c_str(), 40);
 	if (config.mqttPort == 0) {
+#ifdef USE_SSL
+		strcpy(mqttPort, "8883");
+#else // USE_SSL
 		strcpy(mqttPort, "1883");
+#endif // USE_SSL
 	} else {
 		snprintf(mqttPort, sizeof(mqttPort), "%d", config.mqttPort);
 	}
