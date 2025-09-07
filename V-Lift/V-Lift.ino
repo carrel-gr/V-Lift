@@ -36,7 +36,7 @@ Author:		David Carrel
 void setButtonLEDs(int freq = 0);
 
 // Device parameters
-char _version[VERSION_STR_LEN] = "v1.12";
+char _version[VERSION_STR_LEN] = "v1.13";
 char myUniqueId[17];
 char statusTopic[128];
 
@@ -1455,15 +1455,15 @@ updateDisplayInfo()
 
 	// Get Pod status info for line 3
 	if (myPodNum == 1) {
-		int activePeers = 0;
+		int8_t activePeers = 0;
 		for (int podNum = 1; podNum <= NUM_PODS; podNum++) {
 			if (POD_DATA_IS_FRESH(podNum)) {
 				activePeers++;
 			}
 		}
-		snprintf(line3, sizeof(line3), "Pod 1: peers %d/%u/%d", activePeers, WiFi.softAPgetStationNum() + 1, NUM_PODS);
+		snprintf(line3, sizeof(line3), "Pod 1: peers %hhd/%u/%d", activePeers, WiFi.softAPgetStationNum() + 1, NUM_PODS);
 	} else {
-		snprintf(line3, sizeof(line3), "Pod %d", myPodNum);
+		snprintf(line3, sizeof(line3), "Pod %d: peers %d/%d/%d", myPodNum, POD_DATA_IS_FRESH(0) ? 1 : 0, WiFi.status() == WL_CONNECTED ? 1 : 0, NUM_PODS);
 	}
 
 	if (dbgIdx < 1) {
