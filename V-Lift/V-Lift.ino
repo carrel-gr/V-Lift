@@ -33,7 +33,7 @@ Author:		David Carrel
 void setButtonLEDs(int freq = 0);
 
 // Device parameters
-char _version[VERSION_STR_LEN] = "v1.10";
+char _version[VERSION_STR_LEN] = "v1.11";
 char myUniqueId[17];
 char statusTopic[128];
 
@@ -391,14 +391,20 @@ configHandler(void)
 {
 	Preferences preferences;
 	WiFiManager wifiManager;
+	char mqttPort[8];
 
 	wifiManager.setBreakAfterConfig(true);
 	wifiManager.setTitle(DEVICE_NAME);
 	wifiManager.setShowInfoUpdate(false);
 	WiFiManagerParameter p_lineBreak_text("<p>MQTT settings:</p>");
-	WiFiManagerParameter custom_mqtt_server("server", "MQTT server", "", 40);
-	WiFiManagerParameter custom_mqtt_port("port", "MQTT port", "1883", 6);
-	WiFiManagerParameter custom_mqtt_user("user", "MQTT user", "", 32);
+	WiFiManagerParameter custom_mqtt_server("server", "MQTT server", config.mqttSrvr.c_str(), 40);
+	if (config.mqttPort == 0) {
+		strcpy(mqttPort, "1883");
+	} else {
+		snprintf(mqttPort, sizeof(mqttPort), "%d", config.mqttPort);
+	}
+	WiFiManagerParameter custom_mqtt_port("port", "MQTT port", mqttPort, 6);
+	WiFiManagerParameter custom_mqtt_user("user", "MQTT user", config.mqttUser.c_str(), 32);
 	WiFiManagerParameter custom_mqtt_pass("mpass", "MQTT password", "", 32);
 #ifdef MP_XIAO_ESP32C6
 	const char _customHtml_checkbox[] = "type=\"checkbox\"";
