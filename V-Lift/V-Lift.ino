@@ -36,7 +36,7 @@ Author:		David Carrel
 void setButtonLEDs(int freq = 0);
 
 // Device parameters
-char _version[VERSION_STR_LEN] = "v1.13";
+char _version[VERSION_STR_LEN] = "v1.14";
 char myUniqueId[17];
 char statusTopic[128];
 
@@ -247,8 +247,8 @@ void setup()
 #endif // USE_DISPLAY
 
 	pinMode(BAT_READ_PIN, INPUT);		// Configure pin for battery voltage
-	pinMode(TOP_SENSOR_PIN, INPUT_PULLUP);
-	pinMode(BOT_SENSOR_PIN, INPUT_PULLUP);
+	pinMode(TOP_SENSOR_PIN, INPUT_PULLDOWN);
+	pinMode(BOT_SENSOR_PIN, INPUT_PULLDOWN);
 	pinMode(UP_RELAY_PIN, OUTPUT);		// Configure pin for controlling relay
 	pinMode(DOWN_RELAY_PIN, OUTPUT);	// Configure pin for controlling relay
 
@@ -676,7 +676,7 @@ getSystemModeFromNumberOne (void)
 	int packetSize = udp.parsePacket();
 
 	while (packetSize) {
-#ifdef DEBUG_OVER_SERIAL
+#if defined(DEBUG_UDP) && defined(DEBUG_OVER_SERIAL)
 		Serial.print("Received packet of size ");
 		Serial.println(packetSize);
 		Serial.print("From ");
@@ -684,16 +684,16 @@ getSystemModeFromNumberOne (void)
 		Serial.print(remoteIp);
 		Serial.print(", port ");
 		Serial.println(udp.remotePort());
-#endif // DEBUG_OVER_SERIAL
+#endif // DEBUG_UDP && DEBUG_OVER_SERIAL
 
 		// read the packet into buffer
 		int podNum, len = udp.read(buf, sizeof(buf));
 		if (len > 0) {
 			buf[len] = 0;
-#ifdef DEBUG_OVER_SERIAL
+#if defined(DEBUG_UDP) && defined(DEBUG_OVER_SERIAL)
 			Serial.print("Data is: ");
 			Serial.println(buf);
-#endif // DEBUG_OVER_SERIAL
+#endif // DEBUG_UDP && DEBUG_OVER_SERIAL
 #ifdef DEBUG_UDP
 			udpPacketsReceived++;
 #endif // DEBUG_UDP
@@ -740,7 +740,7 @@ getRemotePodStatus (void)
 	int packetSize = udp.parsePacket();
 
 	while (packetSize) {
-#ifdef DEBUG_OVER_SERIAL
+#if defined(DEBUG_OVER_UDP) && defined(DEBUG_OVER_SERIAL)
 		Serial.print("Received packet of size ");
 		Serial.println(packetSize);
 		Serial.print("From ");
@@ -748,16 +748,16 @@ getRemotePodStatus (void)
 		Serial.print(remoteIp);
 		Serial.print(", port ");
 		Serial.println(udp.remotePort());
-#endif // DEBUG_OVER_SERIAL
+#endif // DEBUG_OVER_UDP && DEBUG_OVER_SERIAL
 
 		// read the packet into buffer
 		int podNum, len = udp.read(buf, sizeof(buf));
 		if (len > 0) {
 			buf[len] = 0;
-#ifdef DEBUG_OVER_SERIAL
+#if defined(DEBUG_UDP) && defined(DEBUG_OVER_SERIAL)
 			Serial.print("Data is: ");
 			Serial.println(buf);
-#endif // DEBUG_OVER_SERIAL
+#endif // DEBUG_UDP && DEBUG_OVER_SERIAL
 #ifdef DEBUG_UDP
 			udpPacketsReceived++;
 #endif // DEBUG_UDP
@@ -781,13 +781,13 @@ getRemotePodStatus (void)
 				}
 				{
 					bool ts = parseBool(buf, "TS=");
-					if (ts != pods[podNum].topSensor) resendAllData = true;
-					pods[podNum].topSensor = ts;
+					if (ts != pods[podNum].topSensorWet) resendAllData = true;
+					pods[podNum].topSensorWet = ts;
 				}
 				{
 					bool bs = parseBool(buf, "BS=");
-					if (bs != pods[podNum].botSensor) resendAllData = true;
-					pods[podNum].botSensor = bs;
+					if (bs != pods[podNum].botSensorWet) resendAllData = true;
+					pods[podNum].botSensorWet = bs;
 				}
 				parseStr(buf, "VV=", pods[podNum].version, sizeof(pods[podNum].version));
 				pods[podNum].lastUpdate = millis();
@@ -804,7 +804,7 @@ sendPodInfoToNumberOne (void)
 
 	udp.beginPacket(numOneIP, PRIV_UDP_PORT);
 	udp.printf("PN=%d,BP=%d,MO=%d,AC=%d,PO=%d,TS=%c,BS=%c,VV=%s", myPodNum, myPod->batteryPct,
-		   myPod->mode, myPod->action, myPod->position, myPod->topSensor ? '1' : '0', myPod->botSensor ? '1' : '0', myPod->version);
+		   myPod->mode, myPod->action, myPod->position, myPod->topSensorWet ? '1' : '0', myPod->botSensorWet ? '1' : '0', myPod->version);
 #ifndef DEBUG_UDP
 	udp.endPacket();
 #else // ! DEBUG_UDP
@@ -940,6 +940,9 @@ readSystemModeFromButtons(void)
 			if (!pressed) { // Button released
 				upPress = true;
 			}
+#ifdef DEBUG_OVER_SERIAL
+			Serial.printf("Up button %s.\n", pressed ? "pressed" : "released");
+#endif // DEBUG_OVER_SERIAL
 #endif // USE_LONG_PRESS
 		}
 	}
@@ -967,6 +970,9 @@ readSystemModeFromButtons(void)
 			if (!pressed) { // Button released
 				downPress = true;
 			}
+#ifdef DEBUG_OVER_SERIAL
+			Serial.printf("Up button %s.\n", pressed ? "pressed" : "released");
+#endif // DEBUG_OVER_SERIAL
 #endif // USE_LONG_PRESS
 		}
 	}
@@ -996,66 +1002,82 @@ readSystemModeFromButtons(void)
 }
 
 // Read pod water sensors and determine position
-// Sets topSensor, bottomSensor, and position
+// Sets topSensorWet, botSensorWet, and position
 void
 readPodState(void)
 {
-	boolean top = false, bottom = false;
+	boolean topWet = false, botWet = false;
 	int bottomCount = 0;
 	uint32_t now;
 	static uint32_t almostDownTime = 0, almostUpTime = 0;
+	liftPositions newPosition = myPod->position;
 
+#define SENSOR_WET LOW
 #define SENSOR_NUM_SAMPLES 16
 	for (int i = 0; i < SENSOR_NUM_SAMPLES; i++) {
-		if (digitalRead(TOP_SENSOR_PIN) == LOW) {
+		if (digitalRead(TOP_SENSOR_PIN) == SENSOR_WET) {
 			// If ANY sample is true, set it as "wet"
-			top = true;
+			topWet = true;
 		}
-		if (digitalRead(BOT_SENSOR_PIN) == LOW) {
+		if (digitalRead(BOT_SENSOR_PIN) == SENSOR_WET) {
 			// If ANY sample is true, set it as "wet"
 			bottomCount++;
 		}
 	}
 	if (bottomCount > (SENSOR_NUM_SAMPLES / 2)) {
 		// If half the readings are wet, then we are wet.
-		bottom = true;
+		botWet = true;
 	}
 
-	myPod->topSensor = top;
-	myPod->botSensor = bottom;
+#ifdef DEBUG_OVER_SERIAL
+	if (myPod->topSensorWet != topWet) {
+		Serial.printf("Top sensor changed from %s to %s.\n", myPod->topSensorWet ? "WET" : "DRY", topWet ? "WET" : "DRY");
+	}
+	if (myPod->botSensorWet != botWet) {
+		Serial.printf("Bottom sensor changed from %s to %s.\n", myPod->botSensorWet ? "WET" : "DRY", botWet ? "WET" : "DRY");
+	}
+#endif // DEBUG_OVER_SERIAL
+	myPod->topSensorWet = topWet;
+	myPod->botSensorWet = botWet;
 
 #define ALMOST_DOWN_DELAY 2000  // 2 seconds
 #define ALMOST_UP_DELAY 5000    // 5  seconds
 	now = millis();
-	if (top) {
+	if (topWet) {
 		if (myPod->position == positionMiddle) {
-			myPod->position = positionAlmostDown;
+			newPosition = positionAlmostDown;
 			almostDownTime = now;
 		} else if ((myPod->position == positionAlmostDown) &&
 			   ((almostDownTime + ALMOST_DOWN_DELAY) > now)) {
 			// Do nothing until delay passes
 		} else {
-			myPod->position = positionDown;
+			newPosition = positionDown;
 			almostDownTime = 0;
 		}
 		almostUpTime = 0;
-	} else if (bottom) {
-		myPod->position = positionMiddle;
+	} else if (botWet) {
+		newPosition = positionMiddle;
 		almostDownTime = 0;
 		almostUpTime = 0;
-	} else {
+	} else /* neither wet */ {
 		if (myPod->position == positionMiddle) {
-			myPod->position = positionAlmostUp;
+			newPosition = positionAlmostUp;
 			almostUpTime = now;
 		} else if ((myPod->position == positionAlmostUp) &&
 			   ((almostUpTime + ALMOST_UP_DELAY) > now)) {
 			// Do nothing until delay passes
 		} else {
-			myPod->position = positionUp;
+			newPosition = positionUp;
 			almostUpTime = 0;
 		}
 		almostDownTime = 0;
 	}
+#ifdef DEBUG_OVER_SERIAL
+	if (myPod->position != newPosition) {
+		Serial.printf("Position changed from %d to %d.\n", myPod->position, newPosition);
+	}
+#endif // #ifdef DEBUG_OVER_SERIAL
+	myPod->position = newPosition;
 }
 
 // Read battery state
@@ -1675,10 +1697,10 @@ readEntity(mqttState *singleEntity, char *value, int podNum)
 		sprintf(value, "%0.02f", pods[podNum].batteryVolts);
 		break;
 	case mqttEntityId::entityPodTopSensor:
-		sprintf(value, "%s", pods[podNum].topSensor ? "Wet" : "Dry");
+		sprintf(value, "%s", pods[podNum].topSensorWet ? "Wet" : "Dry");
 		break;
 	case mqttEntityId::entityPodBotSensor:
-		sprintf(value, "%s", pods[podNum].botSensor ? "Wet" : "Dry");
+		sprintf(value, "%s", pods[podNum].botSensorWet ? "Wet" : "Dry");
 		break;
 #ifdef DEBUG_CALLBACKS
 	case mqttEntityId::entityCallbacks:

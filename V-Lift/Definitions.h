@@ -54,7 +54,9 @@ Author:		David Carrel
 #define BAT_MAX 24
 #define BAT_MIN 23
 // A resistor voltage divider is used to bring the voltage into the ADC range
-#define BAT_VOLTAGE_DIVIDER 12
+// Divider = (top_resistor + bottom_resistor) / bottom_resistor
+// top = 470k, bottom = 47k
+#define BAT_VOLTAGE_DIVIDER 11
 // If your ADC is measuring voltage slightly wrong, you can adjust with this.
 #define	BAT_MULTIPLIER 1
 
@@ -94,7 +96,7 @@ Author:		David Carrel
 //#define DEBUG_CALLBACKS	// Enable extra debug MQTT callbacks
 //#define DEBUG_UPTIME
 //#define DEBUG_ZIGBEE
-#define DEBUG_UDP
+//#define DEBUG_UDP
 
 // The device name is used as the MQTT base topic and presence on the network.
 #define DEVICE_NAME "VLift"
@@ -248,8 +250,8 @@ struct podState {
 	enum liftPositions	position;
 	int                     batteryPct;
 	float                   batteryVolts;
-	boolean                 topSensor;
-	boolean                 botSensor;
+	boolean                 topSensorWet;
+	boolean                 botSensorWet;
 	char			version[VERSION_STR_LEN];
 };
 
