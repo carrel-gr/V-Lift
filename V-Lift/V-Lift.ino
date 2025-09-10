@@ -36,7 +36,7 @@ Author:		David Carrel
 void setButtonLEDs(int freq = 0);
 
 // Device parameters
-char _version[VERSION_STR_LEN] = "v1.14";
+char _version[VERSION_STR_LEN] = "v1.15";
 char myUniqueId[17];
 char statusTopic[128];
 
@@ -81,11 +81,6 @@ char _oledLine4[OLED_CHARACTER_WIDTH] = "";
 
 // Config handling
 Config config;
-
-#ifdef DEBUG_OVER_SERIAL
-// Fixed char array for messages to the serial port
-char _debugOutput[128];
-#endif // DEBUG_OVER_SERIAL
 
 #ifdef DEBUG_WIFI
 uint32_t wifiReconnects = 0;
@@ -182,8 +177,7 @@ void setup()
 #endif // USE_DISPLAY
 
 #ifdef DEBUG_OVER_SERIAL
-	sprintf(_debugOutput, "Starting %s", myUniqueId);
-	Serial.println(_debugOutput);
+	Serial.printf("Starting %s\n", myUniqueId);
 	delay(500);
 #endif
 
@@ -691,8 +685,7 @@ getSystemModeFromNumberOne (void)
 		if (len > 0) {
 			buf[len] = 0;
 #if defined(DEBUG_UDP) && defined(DEBUG_OVER_SERIAL)
-			Serial.print("Data is: ");
-			Serial.println(buf);
+			Serial.printf("Data is: %s\n", buf);
 #endif // DEBUG_UDP && DEBUG_OVER_SERIAL
 #ifdef DEBUG_UDP
 			udpPacketsReceived++;
@@ -755,8 +748,7 @@ getRemotePodStatus (void)
 		if (len > 0) {
 			buf[len] = 0;
 #if defined(DEBUG_UDP) && defined(DEBUG_OVER_SERIAL)
-			Serial.print("Data is: ");
-			Serial.println(buf);
+			Serial.printf("Data is: %s\n", buf);
 #endif // DEBUG_UDP && DEBUG_OVER_SERIAL
 #ifdef DEBUG_UDP
 			udpPacketsReceived++;
@@ -1132,13 +1124,7 @@ void
 setupWifi(bool initialConnect, unsigned int tries)
 {
 #ifdef DEBUG_OVER_SERIAL
-	if (initialConnect) {
-		sprintf(_debugOutput, "Connecting to %s", config.wifiSSID.c_str());
-		Serial.println(_debugOutput);
-	} else {
-		sprintf(_debugOutput, "Reconnect to %s", config.wifiSSID.c_str());
-		Serial.println(_debugOutput);
-	}
+	Serial.printf("%s to %s\n", initialConnect ? "Connecting" : "Reconnect", config.wifiSSID.c_str());
 #endif // DEBUG_OVER_SERIAL
 #ifdef DEBUG_WIFI
 	if (!initialConnect && (tries == 0)) {
@@ -1218,8 +1204,7 @@ checkWifiStatus(boolean initialConnect)
 		if (checkTimer(&lastWifiTry, WIFI_RECONNECT_INTERVAL)) {
 			setupWifi(initialConnect, wifiTries);
 #ifdef DEBUG_OVER_SERIAL
-			sprintf(_debugOutput, "WiFi tries = %d", wifiTries);
-			Serial.println(_debugOutput);
+			Serial.printf("WiFi tries = %d\n", wifiTries);
 #endif // DEBUG_OVER_SERIAL
 			wifiTries++;
 		}
@@ -1235,22 +1220,13 @@ checkWifiStatus(boolean initialConnect)
 		udp.begin(myIP, PRIV_UDP_PORT);
 		resendAllData = true;
 #ifdef DEBUG_OVER_SERIAL
-		Serial.print("WiFi connected, IP is ");
-		Serial.print(WiFi.localIP());
-		Serial.print(" : ");
-		Serial.println(WiFi.SSID());
+		Serial.printf("WiFi IP is %s (%s)\n", WiFi.localIP().toString().c_str(), WiFi.SSID().c_str());
 		byte *bssid = WiFi.BSSID();
-		sprintf(_debugOutput, "WiFi BSSID is %02X:%02X:%02X:%02X:%02X:%02X", bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
-		Serial.println(_debugOutput);
-		Serial.print("WiFi RSSI: ");
-		Serial.println(WiFi.RSSI());
+		Serial.printf("WiFi BSSID is %02X:%02X:%02X:%02X:%02X:%02X\n", bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
+		Serial.printf("WiFi RSSI: %hhd\n", WiFi.RSSI());
 		if (myPodNum == 1) {
-			Serial.print("softAP IP address: ");
-			Serial.print(WiFi.softAPIP());
-			Serial.print(" : ");
-			Serial.print(WiFi.softAPSubnetMask());
-			Serial.print(" : ");
-			Serial.println(WiFi.softAPSSID());
+			Serial.printf("softAP IP address: %s : %s (%s)\n", WiFi.softAPIP().toString().c_str(),
+				      WiFi.softAPSubnetMask().toString().c_str(), WiFi.softAPSSID().c_str());
 		}
 #endif // DEBUG_OVER_SERIAL
 	}
@@ -1561,7 +1537,7 @@ setupMqtt(void)
 	}
 
 #ifdef DEBUG_OVER_SERIAL
-	Serial.print("Attempting MQTT connection...");
+	Serial.println("Attempting MQTT connection...");
 #endif
 
 	// Attempt to connect
@@ -1583,8 +1559,7 @@ setupMqtt(void)
 		sprintf(subscriptionDef, "%s", MQTT_SUB_HOMEASSISTANT);
 		subscribed = _mqtt.subscribe(subscriptionDef, MQTT_SUBSCRIBE_QOS);
 #ifdef DEBUG_OVER_SERIAL
-		snprintf(_debugOutput, sizeof(_debugOutput), "Subscribed to \"%s\" : %d", subscriptionDef, subscribed);
-		Serial.println(_debugOutput);
+		Serial.printf("Subscribed to \"%s\" : %d\n", subscriptionDef, subscribed);
 #endif
 
 		for (int i = 0; i < numberOfEntities; i++) {
@@ -1592,8 +1567,7 @@ setupMqtt(void)
 				sprintf(subscriptionDef, DEVICE_NAME "/%s/%s/command", myUniqueId, _mqttAllEntities[i].mqttName);
 				subscribed = subscribed && _mqtt.subscribe(subscriptionDef, MQTT_SUBSCRIBE_QOS);
 #ifdef DEBUG_OVER_SERIAL
-				snprintf(_debugOutput, sizeof(_debugOutput), "Subscribed to \"%s\" : %d", subscriptionDef, subscribed);
-				Serial.println(_debugOutput);
+				Serial.printf("Subscribed to \"%s\" : %d\n", subscriptionDef, subscribed);
 #endif
 			}
 		}
@@ -1606,8 +1580,7 @@ setupMqtt(void)
 	} else {
 		tries++;
 #ifdef DEBUG_OVER_SERIAL
-		sprintf(_debugOutput, "MQTT Failed: RC is %d", _mqtt.state());
-		Serial.println(_debugOutput);
+		Serial.printf("MQTT Failed: RC is %d\n", _mqtt.state());
 #endif
 	}
 	return subscribed;
@@ -2112,8 +2085,7 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 	mqttState *mqttEntity = NULL;
 
 #ifdef DEBUG_OVER_SERIAL
-	sprintf(_debugOutput, "Topic: %s", topic);
-	Serial.println(_debugOutput);
+	Serial.printf("Topic: %s\n", topic);
 #endif
 
 #ifdef DEBUG_CALLBACKS
@@ -2122,8 +2094,7 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 
 	if ((length == 0) || (length >= sizeof(mqttIncomingPayload))) {
 #ifdef DEBUG_OVER_SERIAL
-		sprintf(_debugOutput, "mqttCallback: bad length: %d", length);
-		Serial.println(_debugOutput);
+		Serial.printf("mqttCallback: bad length: %d\n", length);
 #endif
 #ifdef DEBUG_CALLBACKS
 		badCallbacks++;
@@ -2134,8 +2105,7 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 		strlcpy(mqttIncomingPayload, (char *)message, length + 1);
 	}
 #ifdef DEBUG_OVER_SERIAL
-	sprintf(_debugOutput, "Payload: %d", length);
-	Serial.println(_debugOutput);
+	Serial.printf("Payload: %d\n", length);
 	Serial.println(mqttIncomingPayload);
 #endif
 
@@ -2146,7 +2116,6 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 		} else {
 #ifdef DEBUG_OVER_SERIAL
 			Serial.println("Unknown homeassistant/status: ");
-			Serial.println(mqttIncomingPayload);
 #endif
 		}
 		return; // No further processing needed.
@@ -2186,8 +2155,7 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 			break;
 		default:
 #ifdef DEBUG_OVER_SERIAL
-			sprintf(_debugOutput, "Trying to update an unhandled entity! %d", mqttEntity->entityId);
-			Serial.println(_debugOutput);
+			Serial.printf("Trying to update an unhandled entity! %d\n", mqttEntity->entityId);
 #endif
 #ifdef DEBUG_CALLBACKS
 			unknownCallbacks++;
@@ -2197,9 +2165,7 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 
 		if (valueProcessingError) {
 #ifdef DEBUG_OVER_SERIAL
-			snprintf(_debugOutput, sizeof(_debugOutput), "Callback for %s with bad value: ", mqttEntity->mqttName);
-			Serial.print(_debugOutput);
-			Serial.println(mqttIncomingPayload);
+			Serial.printf("Callback for %s with bad value.\n", mqttEntity->mqttName);
 #endif
 #ifdef DEBUG_CALLBACKS
 			badCallbacks++;
@@ -2223,8 +2189,7 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 				break;
 			default:
 #ifdef DEBUG_OVER_SERIAL
-				sprintf(_debugOutput, "Trying to write an unhandled entity! %d", mqttEntity->entityId);
-				Serial.println(_debugOutput);
+				Serial.printf("Trying to write an unhandled entity! %d\n", mqttEntity->entityId);
 #endif
 				break;
 			}
@@ -2246,14 +2211,12 @@ void sendMqtt(const char *topic, bool retain)
 	// Attempt a send
 	if (!_mqtt.publish(topic, _mqttPayload, retain)) {
 #ifdef DEBUG_OVER_SERIAL
-		snprintf(_debugOutput, sizeof(_debugOutput), "MQTT publish failed to %s", topic);
-		Serial.println(_debugOutput);
+		Serial.printf("MQTT publish failed to %s\n", topic);
 		Serial.println(_mqttPayload);
 #endif
 	} else {
 #ifdef DEBUG_OVER_SERIAL
-		//sprintf(_debugOutput, "MQTT publish success");
-		//Serial.println(_debugOutput);
+		//Serial.printf("MQTT publish success\n");
 #endif
 	}
 
