@@ -45,8 +45,6 @@ Author:		David Carrel
 #define UP_LED_PIN	D3
 #define DOWN_LED_PIN	D6
 
-#define USE_BUTTON_INTERRUPTS
-
 // Set your battery MAX/MIN voltage corresponding to 100% and 0%
 // For 2 12V AGM batteries in series, nominal values are 24 and 23
 // For MakerFocus 10000mAh : max 4.16, min 3.0 (nominal), mult 1.03740648
@@ -64,7 +62,7 @@ Author:		David Carrel
 #define MP_XIAO_ESP32C6
 
 // Display parameters
-#define USE_DISPLAY
+//#define USE_DISPLAY
 
 // Subnet for private WiFi (192.168.PRIV_SUBNET.x)
 #define PRIV_WIFI_SUBNET 237

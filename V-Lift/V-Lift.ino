@@ -36,7 +36,7 @@ Author:		David Carrel
 void setButtonLEDs(int freq = 0);
 
 // Device parameters
-char _version[VERSION_STR_LEN] = "v1.15";
+char _version[VERSION_STR_LEN] = "v1.16";
 char myUniqueId[17];
 char statusTopic[128];
 
@@ -65,11 +65,9 @@ unsigned int udpPacketsSentErrors = 0;
 unsigned int udpPacketsReceived = 0;
 #endif // DEBUG_UDP
 
-#ifdef USE_BUTTON_INTERRUPTS
 volatile boolean configButtonPressed = false;
-volatile boolean upButtonChanged = false;
-volatile boolean downButtonChanged = false;
-#endif // USE_BUTTON_INTERRUPTS
+boolean upButtonPressed = false;
+boolean downButtonPressed = false;
 
 #ifdef USE_DISPLAY
 // OLED variables
@@ -161,10 +159,8 @@ void setup()
 #endif // DEBUG_OVER_SERIAL
 
 	pinMode(LED_BUILTIN, OUTPUT);		// Configure LED for output
-	pinMode(CONFIG_BUTTON_PIN, INPUT);	// Configure the user push button
-#ifdef USE_BUTTON_INTERRUPTS
+	pinMode(CONFIG_BUTTON_PIN, INPUT);	// Configure the config push button
 	attachInterrupt(CONFIG_BUTTON_PIN, configButtonISR, FALLING);
-#endif // USE_BUTTON_INTERRUPTS
 
 	// Wire.setClock(10000);
 
@@ -246,22 +242,19 @@ void setup()
 	pinMode(UP_RELAY_PIN, OUTPUT);		// Configure pin for controlling relay
 	pinMode(DOWN_RELAY_PIN, OUTPUT);	// Configure pin for controlling relay
 
-	if (myPodNum == 1) {
-		pinMode(UP_BUTTON_PIN, INPUT_PULLUP);
-		pinMode(DOWN_BUTTON_PIN, INPUT_PULLUP);
-#ifdef USE_BUTTON_INTERRUPTS
-		attachInterrupt(UP_BUTTON_PIN, upButtonISR, CHANGE);
-		attachInterrupt(DOWN_BUTTON_PIN, downButtonISR, CHANGE);
-#endif // USE_BUTTON_INTERRUPTS
-		pinMode(UP_LED_PIN, OUTPUT);
-		pinMode(DOWN_LED_PIN, OUTPUT);
+	pinMode(UP_BUTTON_PIN, INPUT_PULLUP);
+	pinMode(DOWN_BUTTON_PIN, INPUT_PULLUP);
+	pinMode(UP_LED_PIN, OUTPUT);
+	pinMode(DOWN_LED_PIN, OUTPUT);
+
 #ifdef MP_XIAO_ESP32C6
+	if (myPodNum == 1) {
 		pinMode(WIFI_ENABLE, OUTPUT);
 		digitalWrite(WIFI_ENABLE, LOW);
 		pinMode(WIFI_ANT_CONFIG, OUTPUT);
 		digitalWrite(WIFI_ANT_CONFIG, config.extAntenna ? HIGH : LOW);
-#endif // MP_XIAO_ESP32C6
 	}
+#endif // MP_XIAO_ESP32C6
 
 	// Configure WIFI
 	checkWifiStatus(true);
@@ -313,21 +306,20 @@ getPodNumFromButton (void)
 	int podNum = 1;
 
 	for (;;) {
+#ifdef USE_DISPLAY
 		updateOLED(false, "Press button", "to start", "setting pod num.");
-#ifdef USE_BUTTON_INTERRUPTS
+#endif // USE_DISPLAY
+#ifdef DEBUG_OVER_SERIAL
+		Serial.println("Press button to start setting pod num.");
+#endif // DEBUG_OVER_SERIAL
 		if (configButtonPressed) {
 			configButtonPressed = false;
 			break;
 		}
-#else // USE_BUTTON_INTERRUPTS
-#error Not handled
-#endif // USE_BUTTON_INTERRUPTS
 		delay(500);
 	}
 #define POD_NUM_SEC 15
 	for (int sec = POD_NUM_SEC; sec > 0; sec--) {
-		char line3[OLED_CHARACTER_WIDTH], line4[OLED_CHARACTER_WIDTH];
-#ifdef USE_BUTTON_INTERRUPTS
 		if (configButtonPressed) {
 			configButtonPressed = false;
 			podNum++;
@@ -336,12 +328,15 @@ getPodNumFromButton (void)
 			}
 			sec = POD_NUM_SEC;
 		}
-#else // USE_BUTTON_INTERRUPTS
-#error Not handled
-#endif // USE_BUTTON_INTERRUPTS
+#ifdef USE_DISPLAY
+		char line3[OLED_CHARACTER_WIDTH], line4[OLED_CHARACTER_WIDTH];
 		snprintf(line3, sizeof(line3), "        %d", podNum);
 		snprintf(line4, sizeof(line4), "Saving in %d seconds", sec);
 		updateOLED(false, "** Set Pod number **", line3, line4);
+#endif // USE_DISPLAY
+#ifdef DEBUG_OVER_SERIAL
+		Serial.printf("Pod # %d.  Saving this value in %d seconds.\n", podNum, sec);
+#endif // DEBUG_OVER_SERIAL
 		delay(1000);
 	}
 	return podNum;
@@ -353,10 +348,6 @@ configLoop (void)
 #ifdef USE_DISPLAY
 	bool flip = false;
 #endif // USE_DISPLAY
-
-#ifdef DEBUG_OVER_SERIAL
-	Serial.println("Configuration is not set.");
-#endif
 
 	for (int i = 0; ; i++) {
 #ifdef USE_DISPLAY
@@ -370,20 +361,20 @@ configLoop (void)
 			updateOLED(false, "Push", "button.", line4);
 		}
 #endif // USE_DISPLAY
+#ifdef DEBUG_OVER_SERIAL
+		Serial.println("Configuration is not set. Push button.");
+#endif
+
 		flashBuiltinLed(250);
 		if (myPodNum == 1) {
 			setButtonLEDs(250);
 		}
 
 		// Read button state
-#ifdef USE_BUTTON_INTERRUPTS
 		if (configButtonPressed) {
 			configButtonPressed = false;
 			break;
 		}
-#else // USE_BUTTON_INTERRUPTS
-#error Not handled
-#endif // USE_BUTTON_INTERRUPTS
 
 		delay(30);
 	}
@@ -421,6 +412,9 @@ configHandler(void)
 #endif // MP_XIAO_ESP32C6
 
 	WiFi.disconnect(true, true); // Disconnect and erase saved WiFi config
+#ifdef DEBUG_OVER_SERIAL
+	Serial.println("Web config is active.");
+#endif // DEBUG_OVER_SERIAL
 #ifdef USE_DISPLAY
 	updateOLED(false, "Web", "config", "active");
 #endif // USE_DISPLAY
@@ -496,7 +490,6 @@ loop ()
 	boolean mqttIsOn = false;
 
 	// Read button state
-#ifdef USE_BUTTON_INTERRUPTS
 	if (configButtonPressed) {
 		Preferences preferences;
 		int podNum;
@@ -511,9 +504,6 @@ loop ()
 		}
 		ESP.restart();
 	}
-#else // USE_BUTTON_INTERRUPTS
-#error Not handled
-#endif // USE_BUTTON_INTERRUPTS
 
 	// Make sure WiFi is good
 	wifiIsOn = checkWifiStatus(false);
@@ -539,13 +529,15 @@ loop ()
 #endif // USE_DISPLAY
 
 	// Update the pod state
+	readPodButtons();
         readBattery();
         readPodState();        // reads/sets sensors, and sets myPod->position
 	myPod->lastUpdate = millis();
 
-	// MQTT/Zigbee might have asynchronously updated pods[0].mode
+	// MQTT/P2P might have asynchronously updated pods[0].mode or buttons
 	if (myPodNum == 1) {
 		pods[0].batteryVolts = pods[1].batteryVolts;  // DAVE - hack.  Clean up
+		getRemotePodStatus();
 		readSystemModeFromButtons();  // Set system (pods[0]) mode based on buttons and system action
 	} else {
 		getSystemModeFromNumberOne();
@@ -564,16 +556,14 @@ loop ()
 		resendAllData = false;
 	}
 
+	setButtonLEDs();
+
 	if (myPodNum == 1) {
-		setButtonLEDs();
-
-		getRemotePodStatus();
-
-		// Send status/keepalive
 		if (checkTimer(&lastRunPodData, POD2POD_DATA_INTERVAL)) {
 			sendCommandsToRemotePods();
 		}
 
+		// Send status/keepalive
 		if (mqttIsOn && checkTimer(&lastRunStatus, STATUS_INTERVAL)) {
 			sendStatus();
 		}
@@ -655,7 +645,7 @@ parseBool (char *data, const char *key)
 
 	valueStr = strstr(data, key);
 	if (valueStr == NULL) {
-		return -1;
+		return false;
 	}
 	valueStr += strlen(key);
 
@@ -781,6 +771,8 @@ getRemotePodStatus (void)
 					if (bs != pods[podNum].botSensorWet) resendAllData = true;
 					pods[podNum].botSensorWet = bs;
 				}
+				if (parseBool(buf, "UB=")) upButtonPressed = true;
+				if (parseBool(buf, "DB=")) downButtonPressed = true;
 				parseStr(buf, "VV=", pods[podNum].version, sizeof(pods[podNum].version));
 				pods[podNum].lastUpdate = millis();
 			}
@@ -795,8 +787,11 @@ sendPodInfoToNumberOne (void)
 	IPAddress numOneIP(192, 168, PRIV_WIFI_SUBNET, 1);
 
 	udp.beginPacket(numOneIP, PRIV_UDP_PORT);
-	udp.printf("PN=%d,BP=%d,MO=%d,AC=%d,PO=%d,TS=%c,BS=%c,VV=%s", myPodNum, myPod->batteryPct,
-		   myPod->mode, myPod->action, myPod->position, myPod->topSensorWet ? '1' : '0', myPod->botSensorWet ? '1' : '0', myPod->version);
+	udp.printf("PN=%d,BP=%d,MO=%d,AC=%d,PO=%d,TS=%c,BS=%c,UB=%c,DB=%c,VV=%s", myPodNum, myPod->batteryPct,
+		   myPod->mode, myPod->action, myPod->position, myPod->topSensorWet ? '1' : '0', myPod->botSensorWet ? '1' : '0',
+		   upButtonPressed ? '1' : '0', downButtonPressed ? '1' : '0', myPod->version);
+	upButtonPressed = false;
+	downButtonPressed = false;
 #ifndef DEBUG_UDP
 	udp.endPacket();
 #else // ! DEBUG_UDP
@@ -869,6 +864,15 @@ setPodAction (void)
 			break;
 		}
 	}
+#ifdef DEBUG_OVER_SERIAL
+	{
+		static liftActions lastAction = actionStop;
+		if (action != lastAction) {
+			Serial.printf("Changing action from %d to %d.\n", lastAction, action);
+			lastAction = action;
+		}
+	}
+#endif // DEBUG_OVER_SERIAL
 	myPod->action = action;
 }
 
@@ -899,80 +903,11 @@ engagePodAction (void)
 void
 readSystemModeFromButtons(void)
 {
-	boolean upPress = false, downPress = false;
-#ifdef USE_LONG_PRESS
-	boolean upLongPress = false, downLongPress = false;
-	static uint32_t upPressLastTime = 0, downPressLastTime = 0;
-#endif // USE_LONG_PRESS
-
-#define LONG_PRESS_TIME 3000    // 3 seconds
-
-#ifdef USE_BUTTON_INTERRUPTS
-	if (upButtonChanged) {
-		noInterrupts();   // Atomically read and reset the flag
-		boolean pressed = (digitalRead(UP_BUTTON_PIN) == LOW);
-		boolean changed = upButtonChanged;
-		upButtonChanged = false;
-		interrupts();
-
-		if (changed) {
-#ifdef USE_LONG_PRESS
-			if (!pressed) { // Button released
-				unsigned long pressDuration = millis() - upPressLastTime;
-				if (upPressLastTime && (pressDuration >= LONG_PRESS_TIME)) {
-					upLongPress = true;
-				} else {
-					upPress = true;
-				}
-				upPressLastTime = 0;
-			} else { // Button pressed
-				upPressLastTime = millis();
-			}
-#else // USE_LONG_PRESS
-			if (!pressed) { // Button released
-				upPress = true;
-			}
+	// If both pressed, we only do UP
+	if (upButtonPressed) {
 #ifdef DEBUG_OVER_SERIAL
-			Serial.printf("Up button %s.\n", pressed ? "pressed" : "released");
+		Serial.println("Up button pressed.");
 #endif // DEBUG_OVER_SERIAL
-#endif // USE_LONG_PRESS
-		}
-	}
-	if (downButtonChanged) {
-		noInterrupts();   // Atomically read and reset the flag
-		boolean pressed = (digitalRead(DOWN_BUTTON_PIN) == LOW);
-		boolean changed = downButtonChanged;
-		downButtonChanged = false;
-		interrupts();
-
-		if (changed) {
-#ifdef USE_LONG_PRESS
-			if (!pressed) { // Button released
-				unsigned long pressDuration = millis() - downPressLastTime;
-				if (downPressLastTime && (pressDuration >= LONG_PRESS_TIME)) {
-					downLongPress = true;
-				} else {
-					downPress = true;
-				}
-				downPressLastTime = 0;
-			} else { // Button pressed
-				downPressLastTime = millis();
-			}
-#else // USE_LONG_PRESS
-			if (!pressed) { // Button released
-				downPress = true;
-			}
-#ifdef DEBUG_OVER_SERIAL
-			Serial.printf("Up button %s.\n", pressed ? "pressed" : "released");
-#endif // DEBUG_OVER_SERIAL
-#endif // USE_LONG_PRESS
-		}
-	}
-#else // USE_BUTTON_INTERRUPTS
-#error Not handled
-#endif // USE_BUTTON_INTERRUPTS
-
-	if (upPress) {
 		if (pods[0].action == actionRaise) {
 			pods[0].mode = modeOff;
 			pods[0].action = actionStop;
@@ -981,7 +916,10 @@ readSystemModeFromButtons(void)
 			pods[0].action = actionRaise;
 		}
 		resendAllData = true;
-	} else if (downPress) {
+	} else if (downButtonPressed) {
+#ifdef DEBUG_OVER_SERIAL
+		Serial.println("Down button pressed.");
+#endif // DEBUG_OVER_SERIAL
 		if (pods[0].action == actionLower) {
 			pods[0].mode = modeOff;
 			pods[0].action = actionStop;
@@ -991,6 +929,9 @@ readSystemModeFromButtons(void)
 		}
 		resendAllData = true;
 	}
+
+	upButtonPressed = false;
+	downButtonPressed = false;
 }
 
 // Read pod water sensors and determine position
@@ -1070,6 +1011,27 @@ readPodState(void)
 	}
 #endif // #ifdef DEBUG_OVER_SERIAL
 	myPod->position = newPosition;
+}
+
+void
+readPodButtons(void)
+{
+	static unsigned long lastRun = 0;
+#define BUTTON_INTERVAL 50
+
+	if (checkTimer(&lastRun, BUTTON_INTERVAL)) {
+		boolean upPressed = (digitalRead(UP_BUTTON_PIN) == LOW);
+		boolean downPressed = (digitalRead(DOWN_BUTTON_PIN) == LOW);
+		static boolean upPressedPrevious = false, downPressedPrevious = false;
+		if (upPressed && !upPressedPrevious) {
+			upButtonPressed = true;
+		}
+		upPressedPrevious = upPressed;
+		if (downPressed && !downPressedPrevious) {
+			downButtonPressed = true;
+		}
+		downPressedPrevious = downPressed;
+	}
 }
 
 // Read battery state
@@ -2235,25 +2197,11 @@ void emptyPayload()
 	_mqttPayload[0] = '\0';
 }
 
-#ifdef USE_BUTTON_INTERRUPTS
 void
 configButtonISR(void)
 {
 	configButtonPressed = true;
 }
-
-void
-upButtonISR(void)
-{
-	upButtonChanged = true;
-}
-
-void
-downButtonISR(void)
-{
-	downButtonChanged = true;
-}
-#endif // USE_BUTTON_INTERRUPTS
 
 #ifdef DEBUG_FREEMEM
 uint32_t freeMemory()
