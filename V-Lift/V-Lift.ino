@@ -36,7 +36,7 @@ Author:		David Carrel
 void setButtonLEDs(int freq = 0);
 
 // Device parameters
-char _version[VERSION_STR_LEN] = "v1.16";
+char _version[VERSION_STR_LEN] = "v1.17";
 char myUniqueId[17];
 char statusTopic[128];
 
@@ -66,8 +66,8 @@ unsigned int udpPacketsReceived = 0;
 #endif // DEBUG_UDP
 
 volatile boolean configButtonPressed = false;
-boolean upButtonPressed = false;
-boolean downButtonPressed = false;
+buttonState frontButtons = nothingPressed;
+buttonState remoteButtons = nothingPressed;
 
 #ifdef USE_DISPLAY
 // OLED variables
@@ -154,13 +154,18 @@ void setup()
 {
 	Preferences preferences;
 
-#ifdef DEBUG_OVER_SERIAL
-	Serial.begin(9600);
-#endif // DEBUG_OVER_SERIAL
+	pinMode(UP_RELAY_PIN, OUTPUT);		// Configure pin for controlling relay
+	pinMode(DOWN_RELAY_PIN, OUTPUT);	// Configure pin for controlling relay
+	digitalWrite(UP_RELAY_PIN, RELAY_OFF);	// ... and turn off!!
+	digitalWrite(DOWN_RELAY_PIN, RELAY_OFF);
 
 	pinMode(LED_BUILTIN, OUTPUT);		// Configure LED for output
 	pinMode(CONFIG_BUTTON_PIN, INPUT);	// Configure the config push button
 	attachInterrupt(CONFIG_BUTTON_PIN, configButtonISR, FALLING);
+
+#ifdef DEBUG_OVER_SERIAL
+	Serial.begin(9600);
+#endif // DEBUG_OVER_SERIAL
 
 	// Wire.setClock(10000);
 
@@ -237,13 +242,11 @@ void setup()
 #endif // USE_DISPLAY
 
 	pinMode(BAT_READ_PIN, INPUT);		// Configure pin for battery voltage
-	pinMode(TOP_SENSOR_PIN, INPUT_PULLDOWN);
-	pinMode(BOT_SENSOR_PIN, INPUT_PULLDOWN);
-	pinMode(UP_RELAY_PIN, OUTPUT);		// Configure pin for controlling relay
-	pinMode(DOWN_RELAY_PIN, OUTPUT);	// Configure pin for controlling relay
+	pinMode(TOP_SENSOR_PIN, SENSOR_PIN_MODE);
+	pinMode(BOT_SENSOR_PIN, SENSOR_PIN_MODE);
 
-	pinMode(UP_BUTTON_PIN, INPUT_PULLUP);
-	pinMode(DOWN_BUTTON_PIN, INPUT_PULLUP);
+	pinMode(UP_BUTTON_PIN, BUTTON_MODE);
+	pinMode(DOWN_BUTTON_PIN, BUTTON_MODE);
 	pinMode(UP_LED_PIN, OUTPUT);
 	pinMode(DOWN_LED_PIN, OUTPUT);
 
@@ -284,7 +287,9 @@ void setup()
 	readBattery();
 	readPodState();
 	pods[0].mode = modeUp;		// System mode
-	pods[0].action = actionStop;	// System action
+	pods[0].action = actionStop;	// System action (not used)
+	pods[0].forceMode = false;
+	pods[0].lastUpdate = millis();
 	myPod->mode = modeUp;		// Always go to UP state when we boot.
 	myPod->action = actionStop;	// and stop until loop reads position
 
@@ -530,9 +535,8 @@ loop ()
 
 	// Update the pod state
 	readPodButtons();
-        readBattery();
-        readPodState();        // reads/sets sensors, and sets myPod->position
-	myPod->lastUpdate = millis();
+	readBattery();
+	readPodState();        // reads/sets sensors, and sets myPod->position
 
 	// MQTT/P2P might have asynchronously updated pods[0].mode or buttons
 	if (myPodNum == 1) {
@@ -553,6 +557,7 @@ loop ()
 		// Read and transmit all entity & HA data to MQTT
 		lastRunSendData = 0;
 		lastRunPodData = 0;
+		lastRunDisplay = 0;
 		resendAllData = false;
 	}
 
@@ -688,6 +693,7 @@ getSystemModeFromNumberOne (void)
 				}
 				pods[podNum].mode = mode;
 //				pods[podNum].action = (liftActions)parseInt(buf, "AC=");
+				pods[podNum].forceMode = parseBool(buf, "FM=");
 				pods[podNum].lastUpdate = millis();
 			}
 		}
@@ -702,7 +708,7 @@ sendCommandsToRemotePods (void)
 		IPAddress podIP(192, 168, PRIV_WIFI_SUBNET, podNum);
 
 		udp.beginPacket(podIP, PRIV_UDP_PORT);
-		udp.printf("PN=0,MO=%d", pods[0].mode);
+		udp.printf("PN=0,MO=%d,FM=%c", pods[0].mode, pods[0].forceMode ? '1' : '0');
 #ifndef DEBUG_UDP
 		udp.endPacket();
 #else // ! DEBUG_UDP
@@ -771,8 +777,7 @@ getRemotePodStatus (void)
 					if (bs != pods[podNum].botSensorWet) resendAllData = true;
 					pods[podNum].botSensorWet = bs;
 				}
-				if (parseBool(buf, "UB=")) upButtonPressed = true;
-				if (parseBool(buf, "DB=")) downButtonPressed = true;
+				remoteButtons = (buttonState)parseInt(buf, "FB=");
 				parseStr(buf, "VV=", pods[podNum].version, sizeof(pods[podNum].version));
 				pods[podNum].lastUpdate = millis();
 			}
@@ -787,11 +792,10 @@ sendPodInfoToNumberOne (void)
 	IPAddress numOneIP(192, 168, PRIV_WIFI_SUBNET, 1);
 
 	udp.beginPacket(numOneIP, PRIV_UDP_PORT);
-	udp.printf("PN=%d,BP=%d,MO=%d,AC=%d,PO=%d,TS=%c,BS=%c,UB=%c,DB=%c,VV=%s", myPodNum, myPod->batteryPct,
+	udp.printf("PN=%d,BP=%d,MO=%d,AC=%d,PO=%d,TS=%c,BS=%c,FB=%d,VV=%s", myPodNum, myPod->batteryPct,
 		   myPod->mode, myPod->action, myPod->position, myPod->topSensorWet ? '1' : '0', myPod->botSensorWet ? '1' : '0',
-		   upButtonPressed ? '1' : '0', downButtonPressed ? '1' : '0', myPod->version);
-	upButtonPressed = false;
-	downButtonPressed = false;
+		   frontButtons, myPod->version);
+	frontButtons = nothingPressed;
 #ifndef DEBUG_UDP
 	udp.endPacket();
 #else // ! DEBUG_UDP
@@ -811,35 +815,46 @@ setButtonLEDs (int freq)
 	static unsigned long lastLed = 0;
 	static boolean toggle = false;
 
-#define LED_ON  HIGH
-#define LED_OFF LOW
-
 	if (freq) {
 		// if INIT, then fast alternate
 		if (checkTimer(&lastLed, freq)) {
-			digitalWrite(UP_LED_PIN, toggle ? LED_ON : LED_OFF);
-			digitalWrite(DOWN_LED_PIN, toggle ? LED_OFF : LED_ON);
+			digitalWrite(UP_LED_PIN, toggle ? BUTTON_LED_ON : BUTTON_LED_OFF);
+			digitalWrite(DOWN_LED_PIN, toggle ? BUTTON_LED_OFF : BUTTON_LED_ON);
 			toggle = !toggle;
 		}
 	} else if (myPod->mode == modeOff) {
 		// if mode == off, then slow flash both
 		if (checkTimer(&lastLed, 2000)) {
-			digitalWrite(UP_LED_PIN, toggle ? LED_ON : LED_OFF);
-			digitalWrite(DOWN_LED_PIN, toggle ? LED_ON : LED_OFF);
+			digitalWrite(UP_LED_PIN, toggle ? BUTTON_LED_ON : BUTTON_LED_OFF);
+			digitalWrite(DOWN_LED_PIN, toggle ? BUTTON_LED_ON : BUTTON_LED_OFF);
 			toggle = !toggle;
 		}
 	} else if (myPod->action == actionRaise) {
 		// if action raise, then turn on UP
-		digitalWrite(UP_LED_PIN, LED_ON);
-		digitalWrite(DOWN_LED_PIN, LED_OFF);
+		if (pods[0].forceMode) {
+			if (checkTimer(&lastLed, 500)) {
+				digitalWrite(UP_LED_PIN, toggle ? BUTTON_LED_ON : BUTTON_LED_OFF);
+				toggle = !toggle;
+			}
+		} else {
+			digitalWrite(UP_LED_PIN, BUTTON_LED_ON);
+		}
+		digitalWrite(DOWN_LED_PIN, BUTTON_LED_OFF);
 	} else if (myPod->action == actionLower) {
 		// if action lower, then turn on DOWN
-		digitalWrite(UP_LED_PIN, LED_OFF);
-		digitalWrite(DOWN_LED_PIN, LED_ON);
+		digitalWrite(UP_LED_PIN, BUTTON_LED_OFF);
+		if (pods[0].forceMode) {
+			if (checkTimer(&lastLed, 500)) {
+				digitalWrite(DOWN_LED_PIN, toggle ? BUTTON_LED_ON : BUTTON_LED_OFF);
+				toggle = !toggle;
+			}
+		} else {
+			digitalWrite(DOWN_LED_PIN, BUTTON_LED_ON);
+		}
 	} else {
 		// turn off
-		digitalWrite(UP_LED_PIN, LED_OFF);
-		digitalWrite(DOWN_LED_PIN, LED_OFF);
+		digitalWrite(UP_LED_PIN, BUTTON_LED_OFF);
+		digitalWrite(DOWN_LED_PIN, BUTTON_LED_OFF);
 	}
 }
 
@@ -849,19 +864,34 @@ setPodAction (void)
 	liftActions action = actionStop;
 
 	// Set pod relay actions
-	if ((myPod->mode == modeUp) || (myPod->mode == modeDown)) {
-		switch (myPod->position) {
-		case positionUp:
-			action = (myPod->mode == modeUp) ? actionStop : actionLower;
+	if (pods[0].forceMode) {
+		switch (pods[0].mode) {
+		case modeUp:
+			action = actionRaise;
 			break;
-		case positionAlmostUp:
-		case positionMiddle:
-		case positionAlmostDown:
-			action = (myPod->mode == modeUp) ? actionRaise : actionLower;
+		case modeDown:
+			action = actionLower;
 			break;
-		case positionDown:
-			action = (myPod->mode == modeUp) ? actionRaise : actionStop;
+		case modeOff:
+		default:
+			action = actionStop;
 			break;
+		}
+	} else {
+		if ((myPod->mode == modeUp) || (myPod->mode == modeDown)) {
+			switch (myPod->position) {
+			case positionUp:
+				action = (myPod->mode == modeUp) ? actionStop : actionLower;
+				break;
+			case positionAlmostUp:
+			case positionMiddle:
+			case positionAlmostDown:
+				action = (myPod->mode == modeUp) ? actionRaise : actionLower;
+				break;
+			case positionDown:
+				action = (myPod->mode == modeUp) ? actionRaise : actionStop;
+				break;
+			}
 		}
 	}
 #ifdef DEBUG_OVER_SERIAL
@@ -879,9 +909,6 @@ setPodAction (void)
 void
 engagePodAction (void)
 {
-#define RELAY_ON  HIGH
-#define RELAY_OFF LOW
-
 	switch(myPod->action) {
 	case actionRaise:
 		digitalWrite(UP_RELAY_PIN, RELAY_ON);
@@ -903,35 +930,63 @@ engagePodAction (void)
 void
 readSystemModeFromButtons(void)
 {
-	// If both pressed, we only do UP
-	if (upButtonPressed) {
+	buttonState buttons = frontButtons;
+
+	if (buttons == buttonState::nothingPressed) {
+		buttons = remoteButtons;
+	}
+	frontButtons = buttonState::nothingPressed;
+	remoteButtons = buttonState::nothingPressed;
+
+	switch (buttons) {
+	case buttonState::nothingPressed:
+		break;
+	case buttonState::upPressed:
+		pods[0].mode = modeUp;
+		pods[0].forceMode = false;
+		pods[0].lastUpdate = millis();
+		resendAllData = true;
 #ifdef DEBUG_OVER_SERIAL
 		Serial.println("Up button pressed.");
 #endif // DEBUG_OVER_SERIAL
-		if (pods[0].action == actionRaise) {
-			pods[0].mode = modeOff;
-			pods[0].action = actionStop;
-		} else {
-			pods[0].mode = modeUp;
-			pods[0].action = actionRaise;
-		}
+		break;
+	case buttonState::downPressed:
+		pods[0].mode = modeDown;
+		pods[0].forceMode = false;
+		pods[0].lastUpdate = millis();
 		resendAllData = true;
-	} else if (downButtonPressed) {
 #ifdef DEBUG_OVER_SERIAL
 		Serial.println("Down button pressed.");
 #endif // DEBUG_OVER_SERIAL
-		if (pods[0].action == actionLower) {
-			pods[0].mode = modeOff;
-			pods[0].action = actionStop;
-		} else {
-			pods[0].mode = modeDown;
-			pods[0].action = actionLower;
-		}
+		break;
+	case buttonState::upLongPressed:
+		pods[0].mode = modeUp;
+		pods[0].forceMode = true;
+		pods[0].lastUpdate = millis();
 		resendAllData = true;
+#ifdef DEBUG_OVER_SERIAL
+		Serial.println("Up button LONG pressed.");
+#endif // DEBUG_OVER_SERIAL
+		break;
+	case buttonState::downLongPressed:
+		pods[0].mode = modeDown;
+		pods[0].forceMode = true;
+		pods[0].lastUpdate = millis();
+		resendAllData = true;
+#ifdef DEBUG_OVER_SERIAL
+		Serial.println("Down button LONG pressed.");
+#endif // DEBUG_OVER_SERIAL
+		break;
+	case buttonState:: bothPressed:
+		pods[0].mode = modeOff;
+		pods[0].forceMode = false;
+		pods[0].lastUpdate = millis();
+		resendAllData = true;
+#ifdef DEBUG_OVER_SERIAL
+		Serial.println("Both buttons pressed.");
+#endif // DEBUG_OVER_SERIAL
+		break;
 	}
-
-	upButtonPressed = false;
-	downButtonPressed = false;
 }
 
 // Read pod water sensors and determine position
@@ -945,7 +1000,6 @@ readPodState(void)
 	static uint32_t almostDownTime = 0, almostUpTime = 0;
 	liftPositions newPosition = myPod->position;
 
-#define SENSOR_WET LOW
 #define SENSOR_NUM_SAMPLES 16
 	for (int i = 0; i < SENSOR_NUM_SAMPLES; i++) {
 		if (digitalRead(TOP_SENSOR_PIN) == SENSOR_WET) {
@@ -973,8 +1027,6 @@ readPodState(void)
 	myPod->topSensorWet = topWet;
 	myPod->botSensorWet = botWet;
 
-#define ALMOST_DOWN_DELAY 2000  // 2 seconds
-#define ALMOST_UP_DELAY 5000    // 5  seconds
 	now = millis();
 	if (topWet) {
 		if (myPod->position == positionMiddle) {
@@ -1011,26 +1063,56 @@ readPodState(void)
 	}
 #endif // #ifdef DEBUG_OVER_SERIAL
 	myPod->position = newPosition;
+	myPod->lastUpdate = now;
 }
 
 void
 readPodButtons(void)
 {
 	static unsigned long lastRun = 0;
+	static unsigned long upPressedMillis = 0, downPressedMillis = 0;
 #define BUTTON_INTERVAL 50
+#define LONG_PRESS_MILLIS 3000 // 3 seconds
 
 	if (checkTimer(&lastRun, BUTTON_INTERVAL)) {
-		boolean upPressed = (digitalRead(UP_BUTTON_PIN) == LOW);
-		boolean downPressed = (digitalRead(DOWN_BUTTON_PIN) == LOW);
-		static boolean upPressedPrevious = false, downPressedPrevious = false;
-		if (upPressed && !upPressedPrevious) {
-			upButtonPressed = true;
+		boolean upPressed = (digitalRead(UP_BUTTON_PIN) == BUTTON_PRESSED);
+		boolean downPressed = (digitalRead(DOWN_BUTTON_PIN) == BUTTON_PRESSED);
+		unsigned long now = millis();
+		if (upPressed && downPressed && ((upPressedMillis == 0) || (downPressedMillis == 0))) {
+			upPressedMillis = now;
+			downPressedMillis = now;
+		} else if (upPressed && (upPressedMillis == 0)) {
+			upPressedMillis = now;
+		} else if (downPressed && (downPressedMillis == 0)) {
+			downPressedMillis = now;
 		}
-		upPressedPrevious = upPressed;
-		if (downPressed && !downPressedPrevious) {
-			downButtonPressed = true;
+		if ((upPressedMillis != 0) && (downPressedMillis != 0)) {
+			if (!upPressed && !downPressed) {
+				frontButtons = buttonState::bothPressed;
+				upPressedMillis = 0;
+				downPressedMillis = 0;
+			}
+		} else if (upPressedMillis != 0) {
+			if (!upPressed) {
+				if ((now - upPressedMillis) > LONG_PRESS_MILLIS) {
+					frontButtons = buttonState::upLongPressed;
+				} else {
+					frontButtons = buttonState::upPressed;
+				}
+				upPressedMillis = 0;
+			}
+		} else if (downPressedMillis != 0) {
+			if (!downPressed) {
+				if ((now - downPressedMillis) > LONG_PRESS_MILLIS) {
+					frontButtons = buttonState::downLongPressed;
+				} else {
+					frontButtons = buttonState:: downPressed;
+				}
+				downPressedMillis = 0;
+			}
+		} else {
+			frontButtons = buttonState::nothingPressed;
 		}
-		downPressedPrevious = downPressed;
 	}
 }
 
@@ -1266,14 +1348,13 @@ updateOLED(bool justStatus, const char* line2, const char* line3, const char* li
 	rssi = WiFi.RSSI();
 	// There's 20 characters we can play with, width wise.
 	{
-		char wifiStatus, mqttStatus, oneStatus;
+		char wifiStatus, mqttStatus;
 
 		wifiStatus = mqttStatus = ' ';
-		oneStatus = POD_DATA_IS_FRESH(0) ? '1' : ' ';
 		wifiStatus = WiFi.status() == WL_CONNECTED ? 'W' : ' ';
 		mqttStatus = _mqtt.connected() && _mqtt.loop() ? 'M' : ' ';
-		snprintf(line1, sizeof(line1), "Lift %c%c%c%c        %3hhd",
-			 _oledOperatingIndicator, wifiStatus, mqttStatus, oneStatus, rssi);
+		snprintf(line1, sizeof(line1), "Pod%d %c%c%c         %3hhd",
+			 myPodNum, _oledOperatingIndicator, wifiStatus, mqttStatus, rssi);
 	}
 	_display.println(line1);
 	printWifiBars(rssi);
@@ -1358,7 +1439,43 @@ updateDisplayInfo()
 	char line3[OLED_CHARACTER_WIDTH] = "";
 	char line4[OLED_CHARACTER_WIDTH] = "";
 
-	// Pod status for line 2
+	// Get system status info for line 2
+	{
+		const char *mode;
+		int8_t activeSys = 0, activePeers = 0, activeWiFi = 0;
+
+		switch (pods[0].mode) {
+		case modeUp:
+			mode = "Up  ";
+			break;
+		case modeDown:
+			mode = "Down";
+			break;
+		case modeOff:
+			mode = "Off ";
+			break;
+		default:
+			mode = "XXXX";
+			break;
+		}
+		if (myPodNum == 1) {
+			activeSys = 1;  // Pod 1 always knows system state.
+			for (int podNum = 1; podNum <= NUM_PODS; podNum++) {
+				if (POD_DATA_IS_FRESH(podNum)) {
+					activePeers++;
+				}
+			}
+			activeWiFi = WiFi.softAPgetStationNum();
+		} else {
+			activeSys = POD_DATA_IS_FRESH(0) ? 1 : 0;
+			activePeers = POD_DATA_IS_FRESH(myPodNum) ? 1 : 0;
+			activeWiFi = WiFi.status() == WL_CONNECTED ? 1 : 0;
+		}
+		snprintf(line2, sizeof(line2), "%s : %hhd/%hhd/%hhd : %s", mode, activeSys, activePeers, activeWiFi,
+			 pods[0].forceMode ? "FORCE" : "NORM"); // 4 + 3 + 5 + 3 + 5
+	}
+
+	// Pod status for line 3
 	{
 		const char *mode, *action, *position;
 
@@ -1410,20 +1527,7 @@ updateDisplayInfo()
 			position = "XXXXX";
 			break;
 		}
-		snprintf(line2, sizeof(line2), "%s : %s : %s", mode, action, position);  // 4 + 3 + 5 + 3 + 5
-	}
-
-	// Get Pod status info for line 3
-	if (myPodNum == 1) {
-		int8_t activePeers = 0;
-		for (int podNum = 1; podNum <= NUM_PODS; podNum++) {
-			if (POD_DATA_IS_FRESH(podNum)) {
-				activePeers++;
-			}
-		}
-		snprintf(line3, sizeof(line3), "Pod 1: peers %hhd/%u/%d", activePeers, WiFi.softAPgetStationNum() + 1, NUM_PODS);
-	} else {
-		snprintf(line3, sizeof(line3), "Pod %d: peers %d/%d/%d", myPodNum, POD_DATA_IS_FRESH(0) ? 1 : 0, WiFi.status() == WL_CONNECTED ? 1 : 0, NUM_PODS);
+		snprintf(line3, sizeof(line3), "%s : %s : %s", mode, action, position);  // 4 + 3 + 5 + 3 + 5
 	}
 
 	if (dbgIdx < 1) {
@@ -2138,10 +2242,16 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 			case mqttEntityId::entitySystemMode:
 				if (!strncmp(singleString, "Up", 3)) {
 					pods[0].mode = liftModes::modeUp;
+					pods[0].forceMode = false;
+					pods[0].lastUpdate = millis();
 				} else if (!strncmp(singleString, "Down", 5)) {
 					pods[0].mode = liftModes::modeDown;
+					pods[0].forceMode = false;
+					pods[0].lastUpdate = millis();
 				} else if (!strncmp(singleString, "Off", 4)) {
 					pods[0].mode = liftModes::modeOff;
+					pods[0].forceMode = false;
+					pods[0].lastUpdate = millis();
 #ifdef DEBUG_CALLBACKS
 				} else {
 					badCallbacks++;

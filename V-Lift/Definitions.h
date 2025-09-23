@@ -22,6 +22,11 @@ Author:		David Carrel
 // How many pods are being controlled
 #define NUM_PODS 6
 
+// How long to wait after detecting up/down before
+// stopping the raise/lower action
+#define ALMOST_DOWN_DELAY 2000  // 2 seconds
+#define ALMOST_UP_DELAY   8000  // 8 seconds
+
 /*************************************************
  * XIAO ESP32C6 Pin map
  *
@@ -56,13 +61,13 @@ Author:		David Carrel
 // top = 470k, bottom = 47k
 #define BAT_VOLTAGE_DIVIDER 11
 // If your ADC is measuring voltage slightly wrong, you can adjust with this.
-#define	BAT_MULTIPLIER 1
+#define	BAT_MULTIPLIER 1.04
 
 // Compiling for ESP32 always.  Add any processor specifics here.
 #define MP_XIAO_ESP32C6
 
 // Display parameters
-//#define USE_DISPLAY
+#define USE_DISPLAY
 
 // Subnet for private WiFi (192.168.PRIV_SUBNET.x)
 #define PRIV_WIFI_SUBNET 237
@@ -150,6 +155,20 @@ Author:		David Carrel
 #define SCREEN_ADDRESS 0x3C
 #define OLED_CHARACTER_WIDTH 21
 #endif // USE_DISPLAY
+
+// Values to pass to digitalWrite() for controlling relays
+#define RELAY_ON  HIGH
+#define RELAY_OFF LOW
+
+// Values to control sensors - NC sensor connected to GND
+#define SENSOR_PIN_MODE INPUT_PULLUP
+#define SENSOR_WET      HIGH
+
+// Values to pass for controlling/configuring button LEDs
+#define BUTTON_MODE    INPUT_PULLUP
+#define BUTTON_PRESSED LOW
+#define BUTTON_LED_ON  HIGH
+#define BUTTON_LED_OFF LOW
 
 #define MAX_MQTT_NAME_LENGTH 81
 #define MAX_FORMATTED_DATA_VALUE_LENGTH 513 // DAVE
@@ -246,11 +265,21 @@ struct podState {
 	enum liftModes          mode = modeOff;
 	enum liftActions	action;
 	enum liftPositions	position;
+	boolean			forceMode;  // Only used by system (pods[0])
 	int                     batteryPct;
 	float                   batteryVolts;
 	boolean                 topSensorWet;
 	boolean                 botSensorWet;
 	char			version[VERSION_STR_LEN];
+};
+
+enum buttonState {
+	nothingPressed,
+	upPressed,
+	downPressed,
+	upLongPressed,
+	downLongPressed,
+	bothPressed
 };
 
 // Config handling                                                                                                                                                                      
