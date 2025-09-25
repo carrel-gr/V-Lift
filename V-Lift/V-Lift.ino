@@ -1,9 +1,8 @@
 /*
-Name:		V-Lift.ino
-Created:	27 August 2025
-Author:		David Carrel
-
-*/
+ * Name:		V-Lift.ino
+ * Created:	27 August 2025
+ * Author:		David Carrel
+ */
 
 #include <bit>
 #include <bitset>
@@ -36,7 +35,7 @@ Author:		David Carrel
 void setButtonLEDs(int freq = 0);
 
 // Device parameters
-char _version[VERSION_STR_LEN] = "v1.17";
+char _version[VERSION_STR_LEN] = "v1.18";
 char myUniqueId[17];
 char statusTopic[128];
 
@@ -66,8 +65,8 @@ unsigned int udpPacketsReceived = 0;
 #endif // DEBUG_UDP
 
 volatile boolean configButtonPressed = false;
-buttonState frontButtons = nothingPressed;
-buttonState remoteButtons = nothingPressed;
+buttonState frontButtons = buttonState::nothingPressed;
+buttonState remoteButtons = buttonState::nothingPressed;
 
 #ifdef USE_DISPLAY
 // OLED variables
@@ -545,6 +544,11 @@ loop ()
 		readSystemModeFromButtons();  // Set system (pods[0]) mode based on buttons and system action
 	} else {
 		getSystemModeFromNumberOne();
+		if (frontButtons != buttonState::nothingPressed) {
+			remoteButtons = frontButtons;
+			frontButtons = buttonState::nothingPressed;
+			resendAllData = true;
+		}
 	}
 	myPod->mode = pods[0].mode;
 	// On remote pods, try waiting for state from #1 before activating the bootup default
@@ -777,7 +781,24 @@ getRemotePodStatus (void)
 					if (bs != pods[podNum].botSensorWet) resendAllData = true;
 					pods[podNum].botSensorWet = bs;
 				}
-				remoteButtons = (buttonState)parseInt(buf, "FB=");
+				{
+					buttonState tmpButtons = (buttonState)parseInt(buf, "FB=");
+					switch (tmpButtons) {
+					case buttonState::upPressed:
+					case buttonState::upLongPressed:
+					case buttonState::downPressed:
+					case buttonState::downLongPressed:
+					case buttonState::bothPressed:
+						remoteButtons = tmpButtons;
+#ifdef DEBUG_OVER_SERIAL
+						Serial.printf("Remote buttons set to %d\n", remoteButtons);
+#endif // DEBUG_OVER_SERIAL
+						break;
+					case buttonState::nothingPressed:
+					default:
+						break;
+					}
+				}
 				parseStr(buf, "VV=", pods[podNum].version, sizeof(pods[podNum].version));
 				pods[podNum].lastUpdate = millis();
 			}
@@ -794,8 +815,13 @@ sendPodInfoToNumberOne (void)
 	udp.beginPacket(numOneIP, PRIV_UDP_PORT);
 	udp.printf("PN=%d,BP=%d,MO=%d,AC=%d,PO=%d,TS=%c,BS=%c,FB=%d,VV=%s", myPodNum, myPod->batteryPct,
 		   myPod->mode, myPod->action, myPod->position, myPod->topSensorWet ? '1' : '0', myPod->botSensorWet ? '1' : '0',
-		   frontButtons, myPod->version);
-	frontButtons = nothingPressed;
+		   remoteButtons, myPod->version);
+	if (remoteButtons != buttonState::nothingPressed) {
+#ifdef DEBUG_OVER_SERIAL
+		Serial.printf("Sending Front buttons (%d) to #1.\n", remoteButtons);
+#endif // DEBUG_OVER_SERIAL
+		remoteButtons = buttonState::nothingPressed;
+	}
 #ifndef DEBUG_UDP
 	udp.endPacket();
 #else // ! DEBUG_UDP
@@ -947,7 +973,7 @@ readSystemModeFromButtons(void)
 		pods[0].lastUpdate = millis();
 		resendAllData = true;
 #ifdef DEBUG_OVER_SERIAL
-		Serial.println("Up button pressed.");
+		Serial.println("Up button press consumed.");
 #endif // DEBUG_OVER_SERIAL
 		break;
 	case buttonState::downPressed:
@@ -956,7 +982,7 @@ readSystemModeFromButtons(void)
 		pods[0].lastUpdate = millis();
 		resendAllData = true;
 #ifdef DEBUG_OVER_SERIAL
-		Serial.println("Down button pressed.");
+		Serial.println("Down button press consumed.");
 #endif // DEBUG_OVER_SERIAL
 		break;
 	case buttonState::upLongPressed:
@@ -965,7 +991,7 @@ readSystemModeFromButtons(void)
 		pods[0].lastUpdate = millis();
 		resendAllData = true;
 #ifdef DEBUG_OVER_SERIAL
-		Serial.println("Up button LONG pressed.");
+		Serial.println("Up button LONG press consumed.");
 #endif // DEBUG_OVER_SERIAL
 		break;
 	case buttonState::downLongPressed:
@@ -974,7 +1000,7 @@ readSystemModeFromButtons(void)
 		pods[0].lastUpdate = millis();
 		resendAllData = true;
 #ifdef DEBUG_OVER_SERIAL
-		Serial.println("Down button LONG pressed.");
+		Serial.println("Down button LONG press consumed.");
 #endif // DEBUG_OVER_SERIAL
 		break;
 	case buttonState:: bothPressed:
@@ -983,7 +1009,7 @@ readSystemModeFromButtons(void)
 		pods[0].lastUpdate = millis();
 		resendAllData = true;
 #ifdef DEBUG_OVER_SERIAL
-		Serial.println("Both buttons pressed.");
+		Serial.println("Both buttons press consumed.");
 #endif // DEBUG_OVER_SERIAL
 		break;
 	}
@@ -1111,8 +1137,18 @@ readPodButtons(void)
 				downPressedMillis = 0;
 			}
 		} else {
+#ifdef DEBUG_OVER_SERIAL
+			if (frontButtons != buttonState::nothingPressed) {
+				Serial.printf("Front buttons unset from %d\n", frontButtons);
+			}
+#endif // DEBUG_OVER_SERIAL
 			frontButtons = buttonState::nothingPressed;
 		}
+#ifdef DEBUG_OVER_SERIAL
+		if (frontButtons != buttonState::nothingPressed) {
+			Serial.printf("Front buttons set to %d\n", frontButtons);
+		}
+#endif // DEBUG_OVER_SERIAL
 	}
 }
 
