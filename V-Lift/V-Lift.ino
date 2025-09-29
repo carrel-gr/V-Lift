@@ -4,6 +4,10 @@
  * Author:		David Carrel
  */
 
+// DAVE -  todo -- ADD duty-cycle
+// DAVE - todo -- add OTA image update
+// DAVE - _version
+
 #include <bit>
 #include <bitset>
 #include <cstdint>
@@ -13,6 +17,7 @@
 #include <Arduino.h>
 #include <driver/rtc_io.h>
 #include <WiFi.h>
+#include <WiFiClient.h>
 #ifdef USE_SSL
 #include <WiFiClientSecure.h>
 #endif // USE_SSL
@@ -25,6 +30,7 @@
 #include <WiFiManager.h>
 #include <Preferences.h>
 #include <PubSubClient.h>
+#include <ElegantOTA.h>
 #ifdef USE_DISPLAY
 #include <Wire.h>
 #include <Adafruit_GFX.h>
@@ -35,7 +41,7 @@
 void setButtonLEDs(int freq = 0);
 
 // Device parameters
-char _version[VERSION_STR_LEN] = "v1.19";
+char _version[VERSION_STR_LEN] = "v2.02";
 char myUniqueId[17];
 char statusTopic[128];
 
@@ -56,6 +62,10 @@ wifi_power_t wifiPower = WIFI_POWER_11dBm; // Will bump to max before setting
 PubSubClient _mqtt(_wifi);
 char* _mqttPayload = NULL;
 bool resendAllData = false;
+
+// OTA setup
+// DAVE - only on private WiFi
+WebServer *otaServer = NULL;
 
 NetworkUDP udp;
 #ifdef DEBUG_UDP
@@ -421,6 +431,8 @@ configHandler(void)
 	Preferences preferences;
 	char mqttPort[8];
 
+	delete otaServer;
+	otaServer = NULL;
 	WiFi.disconnect(true, true); // Disconnect and erase saved WiFi config
 	WiFi.mode(WIFI_MODE_NULL);
 
@@ -558,6 +570,12 @@ loop ()
 		} else {
 			mqttIsOn = false;
 		}
+	}
+
+	// Handle OTA
+	if (otaServer != NULL) {
+		otaServer->handleClient();
+		ElegantOTA.loop();
 	}
 
 	// Flash board LED (2 seconds)
@@ -1261,9 +1279,9 @@ setupWifi(bool initialConnect, unsigned int tries)
 			// Set up in AP & Station Mode
 			WiFi.mode(WIFI_AP_STA);
 			WiFi.hostname(myUniqueId);
-			WiFi.softAP(PRIV_WIFI_SSID, PRIV_WIFI_PASS);
+//			WiFi.softAP(PRIV_WIFI_SSID, PRIV_WIFI_PASS);
 			WiFi.softAPConfig(privIP, privGateway, privSubnet);
-			WiFi.softAP(PRIV_WIFI_SSID, PRIV_WIFI_PASS, 1, 0, NUM_PODS - 1);
+			WiFi.softAP(PRIV_WIFI_SSID, PRIV_WIFI_PASS, 1, 0, NUM_PODS);
 			// Helps when multiple APs for our SSID
 			WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
 			WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
@@ -1317,6 +1335,10 @@ checkWifiStatus(boolean initialConnect)
 
 	status = WiFi.status();
 	if (initialConnect || (status != WL_CONNECTED)) {
+		if (otaServer) {
+			delete otaServer;
+			otaServer = NULL;
+		}
 		if (checkTimer(&lastWifiTry, WIFI_RECONNECT_INTERVAL)) {
 			setupWifi(initialConnect, wifiTries);
 #ifdef DEBUG_OVER_SERIAL
@@ -1334,6 +1356,9 @@ checkWifiStatus(boolean initialConnect)
 	if ((status == WL_CONNECTED) && (previousWifiStatus != WL_CONNECTED)) {
 		IPAddress myIP(192, 168, PRIV_WIFI_SUBNET, myPodNum);
 		udp.begin(myIP, PRIV_UDP_PORT);
+		otaServer = new WebServer(myIP, 80);
+		ElegantOTA.begin(otaServer);    // Start ElegantOTA
+		otaServer->begin();
 		resendAllData = true;
 #ifdef DEBUG_OVER_SERIAL
 		Serial.printf("WiFi IP is %s (%s)\n", WiFi.localIP().toString().c_str(), WiFi.SSID().c_str());
