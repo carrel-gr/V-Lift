@@ -35,7 +35,7 @@
 void setButtonLEDs(int freq = 0);
 
 // Device parameters
-char _version[VERSION_STR_LEN] = "v1.18";
+char _version[VERSION_STR_LEN] = "v1.19";
 char myUniqueId[17];
 char statusTopic[128];
 
@@ -201,6 +201,7 @@ void setup()
 	if ((config.podNumber < 1) || (config.podNumber > NUM_PODS)) {
 		myPodNum = getPodNumFromButton();
 		myPod = &pods[myPodNum];
+		config.podNumber = myPodNum;
 		preferences.begin(DEVICE_NAME, false); // RW
 		preferences.putInt(PREF_NAME_POD_NUM, myPodNum);
 		preferences.end();
@@ -250,12 +251,10 @@ void setup()
 	pinMode(DOWN_LED_PIN, OUTPUT);
 
 #ifdef MP_XIAO_ESP32C6
-	if (myPodNum == 1) {
-		pinMode(WIFI_ENABLE, OUTPUT);
-		digitalWrite(WIFI_ENABLE, LOW);
-		pinMode(WIFI_ANT_CONFIG, OUTPUT);
-		digitalWrite(WIFI_ANT_CONFIG, config.extAntenna ? HIGH : LOW);
-	}
+	pinMode(WIFI_ENABLE, OUTPUT);
+	digitalWrite(WIFI_ENABLE, LOW);
+	pinMode(WIFI_ANT_CONFIG, OUTPUT);
+	digitalWrite(WIFI_ANT_CONFIG, config.extAntenna ? HIGH : LOW);
 #endif // MP_XIAO_ESP32C6
 
 	// Configure WIFI
@@ -307,7 +306,11 @@ void setup()
 int
 getPodNumFromButton (void)
 {
-	int podNum = 1;
+	int podNum = config.podNumber;
+
+	if ((podNum < 1) || (podNum > NUM_PODS)) {
+		podNum = 1;
+	}
 
 	for (;;) {
 #ifdef USE_DISPLAY
@@ -344,6 +347,32 @@ getPodNumFromButton (void)
 		delay(1000);
 	}
 	return podNum;
+}
+
+boolean
+getExtAntFromButton (void)
+{
+	boolean extAnt = config.extAntenna;
+
+#define EXT_ANT_SEC 15
+	for (int sec = EXT_ANT_SEC; sec > 0; sec--) {
+		if (configButtonPressed) {
+			configButtonPressed = false;
+			extAnt = !extAnt;
+			sec = EXT_ANT_SEC;
+		}
+#ifdef USE_DISPLAY
+		char line3[OLED_CHARACTER_WIDTH], line4[OLED_CHARACTER_WIDTH];
+		snprintf(line3, sizeof(line3), "        %s", extAnt ? "On" : "Off");
+		snprintf(line4, sizeof(line4), "Saving in %d seconds", sec);
+		updateOLED(false, "** Set Ext Antenna *", line3, line4);
+#endif // USE_DISPLAY
+#ifdef DEBUG_OVER_SERIAL
+		Serial.printf("Ext Antenna: %s.  Saving this value in %d seconds.\n", extAnt ? "On" : "Off", sec);
+#endif // DEBUG_OVER_SERIAL
+		delay(1000);
+	}
+	return extAnt;
 }
 
 void
@@ -390,12 +419,16 @@ void
 configHandler(void)
 {
 	Preferences preferences;
-	WiFiManager wifiManager;
 	char mqttPort[8];
 
+	WiFi.disconnect(true, true); // Disconnect and erase saved WiFi config
+	WiFi.mode(WIFI_MODE_NULL);
+
+	WiFiManager wifiManager;
 	wifiManager.setBreakAfterConfig(true);
 	wifiManager.setTitle(DEVICE_NAME);
-	wifiManager.setShowInfoUpdate(false);
+//	wifiManager.setShowInfoUpdate(false);
+//	wifiManager.setShowInfoErase(false);
 	WiFiManagerParameter p_lineBreak_text("<p>MQTT settings:</p>");
 	WiFiManagerParameter custom_mqtt_server("server", "MQTT server", config.mqttSrvr.c_str(), 40);
 	if (config.mqttPort == 0) {
@@ -415,14 +448,6 @@ configHandler(void)
 	WiFiManagerParameter custom_ext_ant("ext_antenna", "Use external WiFi antenna\n", "T", 2, _customHtml_checkbox, WFM_LABEL_AFTER);
 #endif // MP_XIAO_ESP32C6
 
-	WiFi.disconnect(true, true); // Disconnect and erase saved WiFi config
-#ifdef DEBUG_OVER_SERIAL
-	Serial.println("Web config is active.");
-#endif // DEBUG_OVER_SERIAL
-#ifdef USE_DISPLAY
-	updateOLED(false, "Web", "config", "active");
-#endif // USE_DISPLAY
-
 #ifdef MP_XIAO_ESP32C6
 	wifiManager.addParameter(&custom_ext_ant);
 #endif // MP_XIAO_ESP32C6
@@ -431,6 +456,13 @@ configHandler(void)
 	wifiManager.addParameter(&custom_mqtt_port);
 	wifiManager.addParameter(&custom_mqtt_user);
 	wifiManager.addParameter(&custom_mqtt_pass);
+
+#ifdef DEBUG_OVER_SERIAL
+	Serial.println("Web config is active.");
+#endif // DEBUG_OVER_SERIAL
+#ifdef USE_DISPLAY
+	updateOLED(false, "Web", "config", "active");
+#endif // USE_DISPLAY
 
 	if (!wifiManager.startConfigPortal(myUniqueId)) {
 #ifdef DEBUG_OVER_SERIAL
@@ -496,14 +528,18 @@ loop ()
 	// Read button state
 	if (configButtonPressed) {
 		Preferences preferences;
-		int podNum;
 		configButtonPressed = false;
-		podNum = getPodNumFromButton();
-		myPodNum = podNum;
+		myPodNum = getPodNumFromButton();
+#ifdef MP_XIAO_ESP32C6
+		boolean extAnt = getExtAntFromButton();
+#endif // MP_XIAO_ESP32C6
 		preferences.begin(DEVICE_NAME, false); // RW
-		preferences.putInt(PREF_NAME_POD_NUM, podNum);
+		preferences.putInt(PREF_NAME_POD_NUM, myPodNum);
+#ifdef MP_XIAO_ESP32C6
+		preferences.putBool(PREF_NAME_EXT_ANT, extAnt);
+#endif // MP_XIAO_ESP32C6
 		preferences.end();
-		if (podNum == 1) {
+		if (myPodNum == 1) {
 			configHandler();
 		}
 		ESP.restart();
@@ -1609,6 +1645,9 @@ updateDisplayInfo()
 	} else if (dbgIdx < 11) {
 		snprintf(line4, sizeof(line4), "Bat: %d%%  %0.02fV", myPod->batteryPct, myPod->batteryVolts);
 		dbgIdx = 11;
+	} else if (dbgIdx < 12) {
+		snprintf(line4, sizeof(line4), "Ext Ant: %s", config.extAntenna ? "On" : "Off");
+		dbgIdx = 12;
 	} else { // Must be last
 		snprintf(line4, sizeof(line4), "Version: %s", _version);
 		dbgIdx = 0;
