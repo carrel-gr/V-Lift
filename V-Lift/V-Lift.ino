@@ -5,8 +5,9 @@
  */
 
 // DAVE -  todo -- ADD duty-cycle
-// DAVE - todo -- add OTA image update
 // DAVE - _version
+// can softAP do more than 4?
+// scanNetworks - make async - do I need to call it?
 
 #include <bit>
 #include <bitset>
@@ -41,7 +42,7 @@
 void setButtonLEDs(int freq = 0);
 
 // Device parameters
-char _version[VERSION_STR_LEN] = "v2.02";
+char _version[VERSION_STR_LEN] = "v2.04";
 char myUniqueId[17];
 char statusTopic[128];
 
@@ -56,7 +57,9 @@ const char* root_ca = ROOT_CA;
 #else // USE_SSL
 WiFiClient _wifi;
 #endif // USE_SSL
+#ifdef DAVE_WIFI_POWER
 wifi_power_t wifiPower = WIFI_POWER_11dBm; // Will bump to max before setting
+#endif // DAVE_WIFI_POWER
 
 // MQTT parameters
 PubSubClient _mqtt(_wifi);
@@ -64,7 +67,6 @@ char* _mqttPayload = NULL;
 bool resendAllData = false;
 
 // OTA setup
-// DAVE - only on private WiFi
 WebServer *otaServer = NULL;
 
 NetworkUDP udp;
@@ -89,6 +91,7 @@ char _oledLine4[OLED_CHARACTER_WIDTH] = "";
 // Config handling
 Config config;
 
+unsigned int wifiTries = 0;
 #ifdef DEBUG_WIFI
 uint32_t wifiReconnects = 0;
 #endif // DEBUG_WIFI
@@ -110,7 +113,7 @@ static struct mqttState _mqttAllEntities[] =
 #ifdef DEBUG_CALLBACKS
 	{ mqttEntityId::entityCallbacks,          "Callbacks",         false, false, false, homeAssistantClass::haClassInfo },
 #endif // DEBUG_CALLBACKS
-#ifdef DEBUG_WIFI
+#ifdef DEBUG_WIFI_DAVE_HACK
 	{ mqttEntityId::entityRSSI,               "RSSI",              false, false, false, homeAssistantClass::haClassInfo },
 	{ mqttEntityId::entityBSSID,              "BSSID",             false, false, false, homeAssistantClass::haClassInfo },
 	{ mqttEntityId::entityTxPower,            "TX_Power",          false, false, false, homeAssistantClass::haClassInfo },
@@ -132,19 +135,19 @@ static struct mqttState _mqttAllEntities[] =
 
 // These timers are used in the main loop.
 #define RUNSTATE_INTERVAL 2000
-#define STATUS_INTERVAL_ONE_SECOND 1000
-#define STATUS_INTERVAL_FIVE_SECONDS 5000
-#define STATUS_INTERVAL_TEN_SECONDS 10000
-#define STATUS_INTERVAL_THIRTY_SECONDS 30000
-#define STATUS_INTERVAL_ONE_MINUTE 60000
-#define STATUS_INTERVAL_FIVE_MINUTE 300000
-#define STATUS_INTERVAL_ONE_HOUR 3600000
-#define STATUS_INTERVAL_ONE_DAY 86400000
+#define INTERVAL_ONE_SECOND 1000
+#define INTERVAL_FIVE_SECONDS 5000
+#define INTERVAL_TEN_SECONDS 10000
+#define INTERVAL_THIRTY_SECONDS 30000
+#define INTERVAL_ONE_MINUTE 60000
+#define INTERVAL_FIVE_MINUTE 300000
+#define INTERVAL_ONE_HOUR 3600000
+#define INTERVAL_ONE_DAY 86400000
 #define UPDATE_STATUS_BAR_INTERVAL 500
-#define WIFI_RECONNECT_INTERVAL 500  // 1/2 second
-#define STATUS_INTERVAL STATUS_INTERVAL_TEN_SECONDS
-#define DATA_INTERVAL STATUS_INTERVAL_THIRTY_SECONDS
-#define POD2POD_DATA_INTERVAL STATUS_INTERVAL_FIVE_SECONDS
+#define WIFI_RECONNECT_INTERVAL INTERVAL_ONE_MINUTE  // DAVE - change to 5 ??
+#define STATUS_INTERVAL INTERVAL_TEN_SECONDS
+#define DATA_INTERVAL INTERVAL_THIRTY_SECONDS
+#define POD2POD_DATA_INTERVAL INTERVAL_FIVE_SECONDS
 
 #define POD_DATA_IS_FRESH(_podNum) ((pods[_podNum].lastUpdate != 0) && (millis() - pods[_podNum].lastUpdate) < (4 * POD2POD_DATA_INTERVAL))
 
@@ -220,6 +223,12 @@ void setup()
 		myPod = &pods[config.podNumber];
 	}
 
+//	WiFi.persistent(false);
+//DAVE - DAVE
+	WiFi.disconnect(true, true);
+	WiFi.mode(WIFI_MODE_NULL);
+	delay(100);
+
 	// If config is not setup, then enter config mode
 	if (myPodNum == 1) {
 		uint8_t mac[6];
@@ -242,12 +251,13 @@ void setup()
 		WiFi.mode(WIFI_STA);
 		snprintf(myUniqueId, sizeof(myUniqueId), DEVICE_NAME "-pod%d", myPodNum);
 	}
+	WiFi.hostname(myUniqueId);
 #ifdef USE_DISPLAY
 	{
 		char line3[OLED_CHARACTER_WIDTH];
 		snprintf(line3, sizeof(line3), "Pod # %d", myPodNum);
 		updateOLED(false, "Config is set", line3, _version);
-		delay(2000); // DAVE
+		delay(1000); // DAVE
 	}
 #endif // USE_DISPLAY
 
@@ -263,6 +273,7 @@ void setup()
 #ifdef MP_XIAO_ESP32C6
 	pinMode(WIFI_ENABLE, OUTPUT);
 	digitalWrite(WIFI_ENABLE, LOW);
+	delay(100);
 	pinMode(WIFI_ANT_CONFIG, OUTPUT);
 	digitalWrite(WIFI_ANT_CONFIG, config.extAntenna ? HIGH : LOW);
 #endif // MP_XIAO_ESP32C6
@@ -359,6 +370,7 @@ getPodNumFromButton (void)
 	return podNum;
 }
 
+#ifdef DAVE_EXT_ANT
 boolean
 getExtAntFromButton (void)
 {
@@ -384,6 +396,7 @@ getExtAntFromButton (void)
 	}
 	return extAnt;
 }
+#endif // DAVE_EXT_ANT
 
 void
 configLoop (void)
@@ -433,8 +446,10 @@ configHandler(void)
 
 	delete otaServer;
 	otaServer = NULL;
-	WiFi.disconnect(true, true); // Disconnect and erase saved WiFi config
+	WiFi.disconnect();
+	WiFi.softAPdisconnect();
 	WiFi.mode(WIFI_MODE_NULL);
+	delay(100);
 
 	WiFiManager wifiManager;
 	wifiManager.setBreakAfterConfig(true);
@@ -542,16 +557,21 @@ loop ()
 		Preferences preferences;
 		configButtonPressed = false;
 		myPodNum = getPodNumFromButton();
-#ifdef MP_XIAO_ESP32C6
+#if defined(MP_XIAO_ESP32C6) && defined(DAVE_EXT_ANT)
 		boolean extAnt = getExtAntFromButton();
-#endif // MP_XIAO_ESP32C6
+#endif // MP_XIAO_ESP32C6 && DAVE_EXT_ANT
 		preferences.begin(DEVICE_NAME, false); // RW
 		preferences.putInt(PREF_NAME_POD_NUM, myPodNum);
-#ifdef MP_XIAO_ESP32C6
+#if defined(MP_XIAO_ESP32C6) && defined(DAVE_EXT_ANT)
 		preferences.putBool(PREF_NAME_EXT_ANT, extAnt);
-#endif // MP_XIAO_ESP32C6
+#endif // MP_XIAO_ESP32C6 && DAVE_EXT_ANT
 		preferences.end();
 		if (myPodNum == 1) {
+//			preferences.begin(DEVICE_NAME, false); // RW
+//			preferences.putString(PREF_NAME_SSID, "SFYCMEMBERS");
+//			preferences.putString(PREF_NAME_PASS, "SFYC1869");
+//			preferences.end();
+// DAVE - hack
 			configHandler();
 		}
 		ESP.restart();
@@ -722,7 +742,7 @@ getSystemModeFromNumberOne (void)
 	char buf[UDP_BUF_SIZ];
 	int packetSize = udp.parsePacket();
 
-	while (packetSize) {
+	while (packetSize > 0) {
 #if defined(DEBUG_UDP) && defined(DEBUG_OVER_SERIAL)
 		Serial.print("Received packet of size ");
 		Serial.println(packetSize);
@@ -787,7 +807,7 @@ getRemotePodStatus (void)
 	int packetSize = udp.parsePacket();
 
 	while (packetSize) {
-#if defined(DEBUG_OVER_UDP) && defined(DEBUG_OVER_SERIAL)
+#if defined(DEBUG_UDP) && defined(DEBUG_OVER_SERIAL)
 		Serial.print("Received packet of size ");
 		Serial.println(packetSize);
 		Serial.print("From ");
@@ -1255,116 +1275,149 @@ getUptimeSeconds(void)
  * Connect to WiFi
  */
 void
-setupWifi(bool initialConnect, unsigned int tries)
+setupWifi(/*unsigned int tries*/)
 {
-#ifdef DEBUG_OVER_SERIAL
-	Serial.printf("%s to %s\n", initialConnect ? "Connecting" : "Reconnect", config.wifiSSID.c_str());
-#endif // DEBUG_OVER_SERIAL
-#ifdef DEBUG_WIFI
-	if (!initialConnect && (tries == 0)) {
-		wifiReconnects++;
-	}
-#endif // DEBUG_WIFI
+	IPAddress privIP(192, 168, PRIV_WIFI_SUBNET, myPodNum); // IP for the AP
+	IPAddress privGateway(192, 168, PRIV_WIFI_SUBNET, 1); // Gateway IP (same as local_IP for AP)
+	IPAddress privSubnet(255, 255, 255, 0); // Subnet mask
 
-	if (tries % 50 == 0) {
-		IPAddress privIP(192, 168, PRIV_WIFI_SUBNET, myPodNum); // Desired IP for the ESP32 AP
-		IPAddress privGateway(192, 168, PRIV_WIFI_SUBNET, 1); // Gateway IP (often the same as local_IP for AP)
-		IPAddress privSubnet(255, 255, 255, 0); // Subnet mask
-
+	if (myPodNum == 1) {
 		WiFi.disconnect();
 		WiFi.softAPdisconnect();
 		WiFi.mode(WIFI_MODE_NULL);
+		delay(100);
 
-		if (myPodNum == 1) {
-			// Set up in AP & Station Mode
-			WiFi.mode(WIFI_AP_STA);
-			WiFi.hostname(myUniqueId);
-//			WiFi.softAP(PRIV_WIFI_SSID, PRIV_WIFI_PASS);
-			WiFi.softAPConfig(privIP, privGateway, privSubnet);
-			WiFi.softAP(PRIV_WIFI_SSID, PRIV_WIFI_PASS, 1, 0, NUM_PODS);
-			// Helps when multiple APs for our SSID
-			WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
-			WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
-			WiFi.begin(config.wifiSSID.c_str(), config.wifiPass.c_str());
-		} else {
-			// Set up in Station Mode - Will be connecting to an access point
-			WiFi.mode(WIFI_STA);
-			WiFi.hostname(myUniqueId);
-			WiFi.config(privIP, privGateway, privGateway, privSubnet);
-			WiFi.begin(PRIV_WIFI_SSID, PRIV_WIFI_PASS);
-		}
+		// Set up in AP & Station Mode
+		WiFi.mode(WIFI_AP_STA);
+		delay(100);
+		WiFi.hostname(myUniqueId);
+		// Helps when multiple APs for our SSID
+//		WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
+//		WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
+//		WiFi.softAP(PRIV_WIFI_SSID, PRIV_WIFI_PASS);
+		WiFi.softAPConfig(privIP, privGateway, privSubnet);
+		delay(100);
+		WiFi.softAP(PRIV_WIFI_SSID, PRIV_WIFI_PASS, MY_WIFI_CHANNEL, 0, NUM_PODS);
+		delay(100);
 
-		if (tries != 0) { // Don't change/set power the first time through.
-			switch (wifiPower) {
-			case WIFI_POWER_19_5dBm:
-				wifiPower = WIFI_POWER_19dBm;
-				break;
-			case WIFI_POWER_19dBm:
-				wifiPower = WIFI_POWER_18_5dBm;
-				break;
-			case WIFI_POWER_18_5dBm:
-				wifiPower = WIFI_POWER_17dBm;
-				break;
-			case WIFI_POWER_17dBm:
-				wifiPower = WIFI_POWER_15dBm;
-				break;
-			case WIFI_POWER_15dBm:
-				wifiPower = WIFI_POWER_13dBm;
-				break;
-			case WIFI_POWER_13dBm:
-				wifiPower = WIFI_POWER_11dBm;
-				break;
-			case WIFI_POWER_11dBm:
-			default:
-				wifiPower = WIFI_POWER_19_5dBm;
-				break;
-			}
-			WiFi.setTxPower(wifiPower);
-		}
+		// Set these up here for pod #1  because SoftAP never goes away
+		udp.begin(privIP, PRIV_UDP_PORT);
+		otaServer = new WebServer(privIP, 80);
+		ElegantOTA.begin(otaServer);    // Start ElegantOTA
+		otaServer->begin();
+
+//		// Helps when multiple APs for our SSID
+//		WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
+//		WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
+//		WiFi.enableLongRange(true);
+//		delay(100);
+		WiFi.begin(config.wifiSSID.c_str(), config.wifiPass.c_str(), MY_WIFI_CHANNEL);
+	} else {
+		WiFi.disconnect();
+		WiFi.mode(WIFI_MODE_NULL);
+		delay(100);
+
+		// Set up in Station Mode - Will be connecting to #1's access point
+		WiFi.mode(WIFI_STA);
+		delay(100);
+		WiFi.hostname(myUniqueId);
+		WiFi.config(privIP, privGateway, privGateway, privSubnet);
+		delay(100);
+		WiFi.begin(PRIV_WIFI_SSID, PRIV_WIFI_PASS);
 	}
+	WiFi.setAutoReconnect(true);
+
+#ifdef DAVE_WIFI_POWER
+	if (tries != 0) { // Don't change/set power the first time through.
+		switch (wifiPower) {
+		case WIFI_POWER_19_5dBm:
+			wifiPower = WIFI_POWER_19dBm;
+			break;
+		case WIFI_POWER_19dBm:
+			wifiPower = WIFI_POWER_18_5dBm;
+			break;
+		case WIFI_POWER_18_5dBm:
+			wifiPower = WIFI_POWER_17dBm;
+			break;
+		case WIFI_POWER_17dBm:
+			wifiPower = WIFI_POWER_15dBm;
+			break;
+		case WIFI_POWER_15dBm:
+			wifiPower = WIFI_POWER_13dBm;
+			break;
+		case WIFI_POWER_13dBm:
+			wifiPower = WIFI_POWER_11dBm;
+			break;
+		case WIFI_POWER_11dBm:
+		default:
+			wifiPower = WIFI_POWER_19_5dBm;
+			break;
+		}
+		WiFi.setTxPower(wifiPower);
+	}
+#endif // DAVE_WIFI_POWER
 }
 
 boolean
 checkWifiStatus(boolean initialConnect)
 {
 	static unsigned long lastWifiTry = 0;
-	static unsigned int wifiTries = 0;
 	static uint8_t previousWifiStatus = 0;
 	uint8_t status;
-	boolean ret = false;
 
 	status = WiFi.status();
 	if (initialConnect || (status != WL_CONNECTED)) {
-		if (otaServer) {
-			delete otaServer;
-			otaServer = NULL;
+		if (previousWifiStatus == WL_CONNECTED) {
+			if (myPodNum != 1) {
+				udp.clear();
+				udp.stop();
+				if (otaServer) {
+					delete otaServer;
+					otaServer = NULL;
+				}
+			}
 		}
 		if (checkTimer(&lastWifiTry, WIFI_RECONNECT_INTERVAL)) {
-			setupWifi(initialConnect, wifiTries);
+			if (initialConnect) {
 #ifdef DEBUG_OVER_SERIAL
-			Serial.printf("WiFi tries = %d\n", wifiTries);
+				Serial.printf("Connecting to %s\n", myPodNum == 1 ? config.wifiSSID.c_str() : PRIV_WIFI_SSID);
 #endif // DEBUG_OVER_SERIAL
+				setupWifi(/*wifiTries*/);
+			} else {
+#ifdef DEBUG_OVER_SERIAL
+				Serial.printf("Reconnect to %s\n", myPodNum == 1 ? config.wifiSSID.c_str() : PRIV_WIFI_SSID);
+#endif // DEBUG_OVER_SERIAL
+//				WiFi.disconnect();
+//				delay(100);
+				WiFi.reconnect();
+			}
 			wifiTries++;
 		}
 	}
 
 	if (status == WL_CONNECTED) {
 		wifiTries = 0;
-		lastWifiTry = 0;
-		ret = true;
+		lastWifiTry = millis();
 	}
 	if ((status == WL_CONNECTED) && (previousWifiStatus != WL_CONNECTED)) {
-		IPAddress myIP(192, 168, PRIV_WIFI_SUBNET, myPodNum);
-		udp.begin(myIP, PRIV_UDP_PORT);
-		otaServer = new WebServer(myIP, 80);
-		ElegantOTA.begin(otaServer);    // Start ElegantOTA
-		otaServer->begin();
+		IPAddress privIP(192, 168, PRIV_WIFI_SUBNET, myPodNum);
+#ifdef DEBUG_WIFI
+		wifiReconnects++;
+#endif // DEBUG_WIFI
+		if (myPodNum != 1) {
+// DAVE - can any of these block?
+			udp.begin(privIP, PRIV_UDP_PORT);
+			otaServer = new WebServer(privIP, 80);
+			ElegantOTA.begin(otaServer);    // Start ElegantOTA
+			otaServer->begin();
+		}
 		resendAllData = true;
 #ifdef DEBUG_OVER_SERIAL
 		Serial.printf("WiFi IP is %s (%s)\n", WiFi.localIP().toString().c_str(), WiFi.SSID().c_str());
 		byte *bssid = WiFi.BSSID();
 		Serial.printf("WiFi BSSID is %02X:%02X:%02X:%02X:%02X:%02X\n", bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
 		Serial.printf("WiFi RSSI: %hhd\n", WiFi.RSSI());
+		Serial.printf("WiFi channel: %ld\n", WiFi.channel());
 		if (myPodNum == 1) {
 			Serial.printf("softAP IP address: %s : %s (%s)\n", WiFi.softAPIP().toString().c_str(),
 				      WiFi.softAPSubnetMask().toString().c_str(), WiFi.softAPSSID().c_str());
@@ -1373,7 +1426,7 @@ checkWifiStatus(boolean initialConnect)
 	}
 	previousWifiStatus = status;
 
-	return ret;
+	return status == WL_CONNECTED;
 }
 
 /*
@@ -1643,7 +1696,7 @@ updateDisplayInfo()
 		snprintf(line4, sizeof(line4), "WiFi TX: %0.01fdBm", (int)WiFi.getTxPower() / 4.0f);
 		dbgIdx = 4;
 	} else if (dbgIdx < 5) {
-		snprintf(line4, sizeof(line4), "WiFi RSSI: %d", WiFi.RSSI());
+		snprintf(line4, sizeof(line4), "WiFi tries: %d", wifiTries);
 		dbgIdx = 5;
 #endif // DEBUG_WIFI
 #ifdef DEBUG_CALLBACKS
@@ -1670,9 +1723,11 @@ updateDisplayInfo()
 	} else if (dbgIdx < 11) {
 		snprintf(line4, sizeof(line4), "Bat: %d%%  %0.02fV", myPod->batteryPct, myPod->batteryVolts);
 		dbgIdx = 11;
+#ifdef DAVE_EXT_ANT
 	} else if (dbgIdx < 12) {
 		snprintf(line4, sizeof(line4), "Ext Ant: %s", config.extAntenna ? "On" : "Off");
 		dbgIdx = 12;
+#endif // DAVE_EXT_ANT
 	} else { // Must be last
 		snprintf(line4, sizeof(line4), "Version: %s", _version);
 		dbgIdx = 0;
@@ -1859,7 +1914,7 @@ readEntity(mqttState *singleEntity, char *value, int podNum)
 	case mqttEntityId::entityVersion:
 		sprintf(value, "%s", pods[podNum].version);
 		break;
-#ifdef DEBUG_WIFI
+#ifdef DEBUG_WIFI_DAVE_HACK
 	case mqttEntityId::entityRSSI:
 		sprintf(value, "%d", WiFi.RSSI());
 		break;
@@ -2065,7 +2120,7 @@ addConfig(mqttState *singleEntity, int podNum)
 			", \"icon\": \"mdi:battery-heart\""
 			", \"suggested_display_precision\": 2");
 		break;
-#ifdef DEBUG_WIFI
+#ifdef DEBUG_WIFI_DAVE_HACK
 	case mqttEntityId::entityRSSI:
 	case mqttEntityId::entityBSSID:
 	case mqttEntityId::entityTxPower:

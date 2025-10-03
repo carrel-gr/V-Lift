@@ -74,6 +74,7 @@ Author:		David Carrel
 #define PRIV_WIFI_SSID "V-Lift"
 #define PRIV_WIFI_PASS "RZtXCLqHNVJKPopiBh3Z"
 #define PRIV_UDP_PORT 9124
+#define MY_WIFI_CHANNEL 11
 
 // Set this to true to set the "retain" flag when publishing to MQTT
 // "retain" is also a flag in mqttState.   This is AND-ed with that.
@@ -95,11 +96,11 @@ Author:		David Carrel
 
 #define DEBUG_OVER_SERIAL	// Enable debugging msgs over serial port
 //#define DEBUG_FREEMEM		// Enable extra debug for memory usage
-//#define DEBUG_WIFI		// Enable extra debug for WiFi
+#define DEBUG_WIFI		// Enable extra debug for WiFi
 //#define DEBUG_CALLBACKS	// Enable extra debug MQTT callbacks
 //#define DEBUG_UPTIME
 //#define DEBUG_ZIGBEE
-//#define DEBUG_UDP
+#define DEBUG_UDP
 
 // The device name is used as the MQTT base topic and presence on the network.
 #define DEVICE_NAME "VLift"
@@ -183,7 +184,7 @@ enum mqttEntityId {
 #ifdef DEBUG_CALLBACKS
 	entityCallbacks,
 #endif // DEBUG_CALLBACKS
-#ifdef DEBUG_WIFI
+#ifdef DEBUG_WIFI_DAVE_HACK
 	entityRSSI,
 	entityBSSID,
 	entityTxPower,
