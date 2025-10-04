@@ -42,7 +42,7 @@
 void setButtonLEDs(int freq = 0);
 
 // Device parameters
-char _version[VERSION_STR_LEN] = "v2.04";
+char _version[VERSION_STR_LEN] = "v2.05";
 char myUniqueId[17];
 char statusTopic[128];
 
@@ -224,8 +224,7 @@ void setup()
 	}
 
 //	WiFi.persistent(false);
-//DAVE - DAVE
-	WiFi.disconnect(true, true);
+//	WiFi.disconnect(true, true);
 	WiFi.mode(WIFI_MODE_NULL);
 	delay(100);
 
@@ -1362,36 +1361,38 @@ boolean
 checkWifiStatus(boolean initialConnect)
 {
 	static unsigned long lastWifiTry = 0;
-	static uint8_t previousWifiStatus = 0;
+	static uint8_t previousWifiStatus = WL_DISCONNECTED;
 	uint8_t status;
 
-	status = WiFi.status();
-	if (initialConnect || (status != WL_CONNECTED)) {
-		if (previousWifiStatus == WL_CONNECTED) {
-			if (myPodNum != 1) {
-				udp.clear();
-				udp.stop();
-				if (otaServer) {
-					delete otaServer;
-					otaServer = NULL;
+	if (initialConnect) {
+#ifdef DEBUG_OVER_SERIAL
+		Serial.printf("Connecting to %s\n", myPodNum == 1 ? config.wifiSSID.c_str() : PRIV_WIFI_SSID);
+#endif // DEBUG_OVER_SERIAL
+		setupWifi(/*wifiTries*/);
+		status = WiFi.status();
+		lastWifiTry = millis();
+	} else {
+		status = WiFi.status();
+		if (status != WL_CONNECTED) {
+			if (previousWifiStatus == WL_CONNECTED) {
+				if (myPodNum != 1) {
+					udp.clear();
+					udp.stop();
+					if (otaServer) {
+						delete otaServer;
+						otaServer = NULL;
+					}
 				}
 			}
-		}
-		if (checkTimer(&lastWifiTry, WIFI_RECONNECT_INTERVAL)) {
-			if (initialConnect) {
-#ifdef DEBUG_OVER_SERIAL
-				Serial.printf("Connecting to %s\n", myPodNum == 1 ? config.wifiSSID.c_str() : PRIV_WIFI_SSID);
-#endif // DEBUG_OVER_SERIAL
-				setupWifi(/*wifiTries*/);
-			} else {
+			if (checkTimer(&lastWifiTry, WIFI_RECONNECT_INTERVAL)) {
 #ifdef DEBUG_OVER_SERIAL
 				Serial.printf("Reconnect to %s\n", myPodNum == 1 ? config.wifiSSID.c_str() : PRIV_WIFI_SSID);
 #endif // DEBUG_OVER_SERIAL
 //				WiFi.disconnect();
 //				delay(100);
-				WiFi.reconnect();
+//				WiFi.reconnect();
+				wifiTries++;
 			}
-			wifiTries++;
 		}
 	}
 
