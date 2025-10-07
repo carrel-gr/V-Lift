@@ -8,6 +8,8 @@
 // DAVE - _version
 // can softAP do more than 4?
 // scanNetworks - make async - do I need to call it?
+// handle top sensor going wet w/o bottom - longer delay after blowing?
+// make 100% battery be higher voltage to encompass more range - maybe send all voltages to MQTT
 
 #include <bit>
 #include <bitset>
@@ -42,7 +44,7 @@
 void setButtonLEDs(int freq = 0);
 
 // Device parameters
-char _version[VERSION_STR_LEN] = "v2.05";
+char _version[VERSION_STR_LEN] = "v2.07";
 char myUniqueId[17];
 char statusTopic[128];
 
