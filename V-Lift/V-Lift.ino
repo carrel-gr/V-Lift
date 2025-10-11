@@ -82,6 +82,11 @@ volatile boolean configButtonPressed = false;
 buttonState frontButtons = buttonState::nothingPressed;
 buttonState remoteButtons = buttonState::nothingPressed;
 
+#ifdef DEBUG_SENSORS
+int topSensorChanges = 0;
+int botSensorChanges = 0;
+#endif // DEBUG_SENSORS
+
 #ifdef USE_DISPLAY
 // OLED variables
 char _oledOperatingIndicator = '*';
@@ -1096,37 +1101,44 @@ void
 readPodState(void)
 {
 	boolean topWet = false, botWet = false;
-	int bottomCount = 0;
+	int topCount = 0, bottomCount = 0;
 	uint32_t now;
 	static uint32_t almostDownTime = 0, almostUpTime = 0;
 	liftPositions newPosition = myPod->position;
 
 #define SENSOR_NUM_SAMPLES 16
 	for (int i = 0; i < SENSOR_NUM_SAMPLES; i++) {
-		if (digitalRead(TOP_SENSOR_PIN) == SENSOR_WET) {
-			// If ANY sample is true, set it as "wet"
-			topWet = true;
-		}
-		if (digitalRead(BOT_SENSOR_PIN) == SENSOR_WET) {
-			// If ANY sample is true, set it as "wet"
-			bottomCount++;
-		}
+		if (digitalRead(TOP_SENSOR_PIN) == SENSOR_WET) topCount++;
+		if (digitalRead(BOT_SENSOR_PIN) == SENSOR_WET) bottomCount++;
 	}
-	if (bottomCount > (SENSOR_NUM_SAMPLES / 2)) {
-		// If half the readings are wet, then we are wet.
+// DAVE	if (topCount > (SENSOR_NUM_SAMPLES / 2)) { // If half the readings
+	if (topCount) { // If any readings
+		topWet = true;
+	}
+	if (bottomCount > (SENSOR_NUM_SAMPLES / 2)) { // If half the readings
 		botWet = true;
 	}
 
-#ifdef DEBUG_OVER_SERIAL
 	if (myPod->topSensorWet != topWet) {
+#ifdef DEBUG_OVER_SERIAL
 		Serial.printf("Top sensor changed from %s to %s.\n", myPod->topSensorWet ? "WET" : "DRY", topWet ? "WET" : "DRY");
+#endif // DEBUG_OVER_SERIAL
+#ifdef DEBUG_SENSORS
+		topSensorChanges++;
+#endif // DEBUG_SENSORS
+		myPod->topSensorWet = topWet;
+		resendAllData = true;
 	}
 	if (myPod->botSensorWet != botWet) {
+#ifdef DEBUG_OVER_SERIAL
 		Serial.printf("Bottom sensor changed from %s to %s.\n", myPod->botSensorWet ? "WET" : "DRY", botWet ? "WET" : "DRY");
-	}
 #endif // DEBUG_OVER_SERIAL
-	myPod->topSensorWet = topWet;
-	myPod->botSensorWet = botWet;
+#ifdef DEBUG_SENSORS
+		botSensorChanges++;
+#endif // DEBUG_SENSORS
+		myPod->botSensorWet = botWet;
+		resendAllData = true;
+	}
 
 	now = millis();
 	if (topWet) {
@@ -1731,6 +1743,13 @@ updateDisplayInfo()
 		snprintf(line4, sizeof(line4), "Ext Ant: %s", config.extAntenna ? "On" : "Off");
 		dbgIdx = 12;
 #endif // DAVE_EXT_ANT
+#ifdef DEBUG_SENSORS
+	} else if (dbgIdx < 13) {
+		snprintf(line4, sizeof(line4), "%s/%d : %s/%d",
+			 myPod->topSensorWet ? "Wet" : "Dry", topSensorChanges,
+			 myPod->botSensorWet ? "Wet" : "Dry", botSensorChanges);
+		dbgIdx = 12; // Leave at 12 so we stick here!!!!!!
+#endif // DEBUG_SENSORS
 	} else { // Must be last
 		snprintf(line4, sizeof(line4), "Version: %s", _version);
 		dbgIdx = 0;

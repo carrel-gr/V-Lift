@@ -101,6 +101,7 @@ Author:		David Carrel
 //#define DEBUG_UPTIME
 //#define DEBUG_ZIGBEE
 //#define DEBUG_UDP
+#define DEBUG_SENSORS
 
 // The device name is used as the MQTT base topic and presence on the network.
 #define DEVICE_NAME "VLift"
