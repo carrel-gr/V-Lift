@@ -1748,7 +1748,7 @@ updateDisplayInfo()
 		snprintf(line4, sizeof(line4), "%s/%d : %s/%d",
 			 myPod->topSensorWet ? "Wet" : "Dry", topSensorChanges,
 			 myPod->botSensorWet ? "Wet" : "Dry", botSensorChanges);
-		dbgIdx = 12; // Leave at 12 so we stick here!!!!!!
+		dbgIdx = 13;
 #endif // DEBUG_SENSORS
 	} else { // Must be last
 		snprintf(line4, sizeof(line4), "Version: %s", _version);
