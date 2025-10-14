@@ -82,22 +82,18 @@ Author:		David Carrel
 #define MQTT_RETAIN true
 // Set this to 1 or 0
 // Use 0 so if lift is offline, control actions don't arrive later
-#define MQTT_SUBSCRIBE_QOS 0
+#define MQTT_SUBSCRIBE_QOS 1
+#define MQTT_PUBLISH_QOS 1
 // Define this to enable the HA force_update option for many (not all) sensors.
 //#define MQTT_FORCE_UPDATE
 
-// 4096 works well given the RAM requirements.
 // You may be able to increase this.
-// On boot will request a buffer size of (MAX_MQTT_PAYLOAD_SIZE + MQTT_HEADER_SIZE) for MQTT, and
-// MAX_MQTT_PAYLOAD_SIZE for building payloads.  If these fail and your device doesn't boot, you can assume you've set this too high.
-#define MAX_MQTT_PAYLOAD_SIZE 4096
-#define MIN_MQTT_PAYLOAD_SIZE 512
-#define MQTT_HEADER_SIZE 512
+#define MAX_MQTT_BUFFER_SIZE 1024
 
 #define DEBUG_OVER_SERIAL	// Enable debugging msgs over serial port
 //#define DEBUG_FREEMEM		// Enable extra debug for memory usage
 #define DEBUG_WIFI		// Enable extra debug for WiFi
-//#define DEBUG_CALLBACKS	// Enable extra debug MQTT callbacks
+#define DEBUG_MQTT		// Enable extra debug MQTT
 //#define DEBUG_UPTIME
 //#define DEBUG_ZIGBEE
 //#define DEBUG_UDP
@@ -182,9 +178,6 @@ enum mqttEntityId {
 #ifdef DEBUG_FREEMEM
 	entityFreemem,
 #endif // DEBUG_FREEMEM
-#ifdef DEBUG_CALLBACKS
-	entityCallbacks,
-#endif // DEBUG_CALLBACKS
 #ifdef DEBUG_WIFI_DAVE_HACK
 	entityRSSI,
 	entityBSSID,

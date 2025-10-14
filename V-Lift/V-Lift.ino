@@ -20,10 +20,6 @@
 #include <Arduino.h>
 #include <driver/rtc_io.h>
 #include <WiFi.h>
-#include <WiFiClient.h>
-#ifdef USE_SSL
-#include <WiFiClientSecure.h>
-#endif // USE_SSL
 #include <NetworkUdp.h>
 #include <WebServer.h>
 #ifndef MP_XIAO_ESP32C6
@@ -32,7 +28,7 @@
 #include <DNSServer.h>
 #include <WiFiManager.h>
 #include <Preferences.h>
-#include <PubSubClient.h>
+#include <PsychicMqttClient.h>
 #include <ElegantOTA.h>
 #ifdef USE_DISPLAY
 #include <Wire.h>
@@ -44,7 +40,7 @@
 void setButtonLEDs(int freq = 0);
 
 // Device parameters
-char _version[VERSION_STR_LEN] = "v2.07";
+char _version[VERSION_STR_LEN] = "v2.30";
 char myUniqueId[17];
 char statusTopic[128];
 
@@ -54,18 +50,23 @@ podState pods[NUM_PODS + 1];  // 0 is (virtual) system
 
 // WiFi parameters
 #ifdef USE_SSL
-WiFiClientSecure _wifi;
 const char* root_ca = ROOT_CA;
-#else // USE_SSL
-WiFiClient _wifi;
 #endif // USE_SSL
 #ifdef DAVE_WIFI_POWER
 wifi_power_t wifiPower = WIFI_POWER_11dBm; // Will bump to max before setting
 #endif // DAVE_WIFI_POWER
 
 // MQTT parameters
-PubSubClient _mqtt(_wifi);
+PsychicMqttClient mqttClient;
 char* _mqttPayload = NULL;
+#ifdef DEBUG_MQTT
+uint32_t mqttRcvCallbacks = 0;
+uint32_t mqttUnkCallbacks = 0;
+uint32_t mqttBadCallbacks = 0;
+uint32_t mqttConnects = 0;
+uint32_t mqttPublishSuccess = 0;
+uint32_t mqttPublishFail = 0;
+#endif // DEBUG_MQTT
 bool resendAllData = false;
 
 // OTA setup
@@ -102,11 +103,6 @@ unsigned int wifiTries = 0;
 #ifdef DEBUG_WIFI
 uint32_t wifiReconnects = 0;
 #endif // DEBUG_WIFI
-#ifdef DEBUG_CALLBACKS
-uint32_t receivedCallbacks = 0;
-uint32_t unknownCallbacks = 0;
-uint32_t badCallbacks = 0;
-#endif // DEBUG_CALLBACKS
 
 /*
  * Home Assistant auto-discovered values
@@ -117,9 +113,6 @@ static struct mqttState _mqttAllEntities[] =
 #ifdef DEBUG_FREEMEM
 	{ mqttEntityId::entityFreemem,            "freemem",           false, false, false, homeAssistantClass::haClassInfo },
 #endif
-#ifdef DEBUG_CALLBACKS
-	{ mqttEntityId::entityCallbacks,          "Callbacks",         false, false, false, homeAssistantClass::haClassInfo },
-#endif // DEBUG_CALLBACKS
 #ifdef DEBUG_WIFI_DAVE_HACK
 	{ mqttEntityId::entityRSSI,               "RSSI",              false, false, false, homeAssistantClass::haClassInfo },
 	{ mqttEntityId::entityBSSID,              "BSSID",             false, false, false, homeAssistantClass::haClassInfo },
@@ -153,7 +146,8 @@ static struct mqttState _mqttAllEntities[] =
 #define UPDATE_STATUS_BAR_INTERVAL 500
 #define WIFI_RECONNECT_INTERVAL INTERVAL_ONE_MINUTE  // DAVE - change to 5 ??
 #define STATUS_INTERVAL INTERVAL_TEN_SECONDS
-#define DATA_INTERVAL INTERVAL_THIRTY_SECONDS
+#define DATA_INTERVAL INTERVAL_ONE_MINUTE
+#define HA_DATA_INTERVAL INTERVAL_FIVE_MINUTE
 #define POD2POD_DATA_INTERVAL INTERVAL_FIVE_SECONDS
 
 #define POD_DATA_IS_FRESH(_podNum) ((pods[_podNum].lastUpdate != 0) && (millis() - pods[_podNum].lastUpdate) < (4 * POD2POD_DATA_INTERVAL))
@@ -286,25 +280,6 @@ void setup()
 
 	// Configure WIFI
 	checkWifiStatus(true);
-
-	if (myPodNum == 1) {
-#ifdef USE_SSL
-		_wifi.setCACert(root_ca);
-#endif // USE_SSL
-		// Configure MQTT to the address and port specified above
-		_mqtt.setServer(config.mqttSrvr.c_str(), config.mqttPort);
-		_mqtt.setBufferSize(MAX_MQTT_PAYLOAD_SIZE + MQTT_HEADER_SIZE);
-		_mqttPayload = new char[MAX_MQTT_PAYLOAD_SIZE];
-		emptyPayload();
-
-		// And any messages we are subscribed to will be pushed to the mqttCallback function for processing
-		_mqtt.setCallback(mqttCallback);
-
-		// Connect to MQTT
-		if (WiFi.status() == WL_CONNECTED) {
-			setupMqtt();
-		}
-	}
 
 	// Initialize data.
 	// myPodNum was set above.
@@ -553,6 +528,7 @@ loop ()
 	static unsigned long lastRunDisplay = 0;
 #endif // USE_DISPLAY
 	static unsigned long lastRunStatus = 0;
+	static unsigned long lastRunSendHaData = 0;
 	static unsigned long lastRunSendData = 0;
 	static unsigned long lastRunPodData = 0;
 	boolean wifiIsOn = false;
@@ -589,10 +565,7 @@ loop ()
 	if (myPodNum == 1) {
 		// make sure mqtt is still connected
 		if (wifiIsOn) {
-			mqttIsOn = _mqtt.connected();
-			if (!mqttIsOn || !_mqtt.loop()) {
-				mqttIsOn = setupMqtt();
-			}
+			mqttIsOn = mqttClient.connected();
 		} else {
 			mqttIsOn = false;
 		}
@@ -639,6 +612,7 @@ loop ()
 
 	if (resendAllData) {
 		// Read and transmit all entity & HA data to MQTT
+		lastRunSendHaData = 0;
 		lastRunSendData = 0;
 		lastRunPodData = 0;
 		lastRunDisplay = 0;
@@ -657,8 +631,10 @@ loop ()
 			sendStatus();
 		}
 
-		if (mqttIsOn && checkTimer(&lastRunSendData, DATA_INTERVAL)) {
+		if (mqttIsOn && checkTimer(&lastRunSendHaData, HA_DATA_INTERVAL)) {
 			sendHaData();
+		}
+		if (mqttIsOn && checkTimer(&lastRunSendData, DATA_INTERVAL)) {
 			sendData();
 		}
 	} else {
@@ -1419,7 +1395,13 @@ checkWifiStatus(boolean initialConnect)
 #ifdef DEBUG_WIFI
 		wifiReconnects++;
 #endif // DEBUG_WIFI
-		if (myPodNum != 1) {
+		if (myPodNum == 1) {
+			static boolean doneOnce = false;
+			if (!doneOnce) {
+				doneOnce = true;
+				initMqtt();
+			}
+		} else {
 // DAVE - can any of these block?
 			udp.begin(privIP, PRIV_UDP_PORT);
 			otaServer = new WebServer(privIP, 80);
@@ -1517,7 +1499,7 @@ updateOLED(bool justStatus, const char* line2, const char* line3, const char* li
 
 		wifiStatus = mqttStatus = ' ';
 		wifiStatus = WiFi.status() == WL_CONNECTED ? 'W' : ' ';
-		mqttStatus = _mqtt.connected() && _mqtt.loop() ? 'M' : ' ';
+		mqttStatus = mqttClient.connected() ? 'M' : ' ';
 		snprintf(line1, sizeof(line1), "Pod%d %c%c%c         %3hhd",
 			 myPodNum, _oledOperatingIndicator, wifiStatus, mqttStatus, rssi);
 	}
@@ -1714,41 +1696,41 @@ updateDisplayInfo()
 		snprintf(line4, sizeof(line4), "WiFi tries: %d", wifiTries);
 		dbgIdx = 5;
 #endif // DEBUG_WIFI
-#ifdef DEBUG_CALLBACKS
+#ifdef DEBUG_MQTT
 	} else if (dbgIdx < 6) {
-		snprintf(line4, sizeof(line4), "Callbacks: %lu", receivedCallbacks);
+		snprintf(line4, sizeof(line4), "MQTT CB: %lu/%lu/%lu", mqttRcvCallbacks, mqttUnkCallbacks, mqttBadCallbacks);
 		dbgIdx = 6;
-	} else if (dbgIdx < 7) {
-		snprintf(line4, sizeof(line4), "Unk CBs: %lu", unknownCallbacks);
-		dbgIdx = 7;
-	} else if (dbgIdx < 8) {
-		snprintf(line4, sizeof(line4), "Bad CBs: %lu", badCallbacks);
-		dbgIdx = 8;
-#endif // DEBUG_CALLBACKS
-#ifdef DEBUG_UPTIME
 	} else if (dbgIdx < 9) {
-		snprintf(line4, sizeof(line4), "Uptime: %lu", getUptimeSeconds());
+		snprintf(line4, sizeof(line4), "MQTT conn: %lu", mqttConnects);
 		dbgIdx = 9;
+	} else if (dbgIdx < 10) {
+		snprintf(line4, sizeof(line4), "MQTT pub: %lu/%lu", mqttPublishSuccess, mqttPublishFail);
+		dbgIdx = 10;
+#endif // DEBUG_MQTT
+#ifdef DEBUG_UPTIME
+	} else if (dbgIdx < 15) {
+		snprintf(line4, sizeof(line4), "Uptime: %lu", getUptimeSeconds());
+		dbgIdx = 15;
 #endif // DEBUG_UPTIME
 #ifdef DEBUG_UDP
-	} else if (dbgIdx < 10) {
+	} else if (dbgIdx < 20) {
 		snprintf(line4, sizeof(line4), "UDP: S=%u/%u  R=%u", udpPacketsSent, udpPacketsSentErrors, udpPacketsReceived);
-		dbgIdx = 10;
+		dbgIdx = 20;
 #endif // DEBUG_UDP
-	} else if (dbgIdx < 11) {
+	} else if (dbgIdx < 21) {
 		snprintf(line4, sizeof(line4), "Bat: %d%%  %0.02fV", myPod->batteryPct, myPod->batteryVolts);
-		dbgIdx = 11;
+		dbgIdx = 21;
 #ifdef DAVE_EXT_ANT
-	} else if (dbgIdx < 12) {
+	} else if (dbgIdx < 22) {
 		snprintf(line4, sizeof(line4), "Ext Ant: %s", config.extAntenna ? "On" : "Off");
-		dbgIdx = 12;
+		dbgIdx = 22;
 #endif // DAVE_EXT_ANT
 #ifdef DEBUG_SENSORS
-	} else if (dbgIdx < 13) {
+	} else if (dbgIdx < 23) {
 		snprintf(line4, sizeof(line4), "%s/%d : %s/%d",
 			 myPod->topSensorWet ? "Wet" : "Dry", topSensorChanges,
 			 myPod->botSensorWet ? "Wet" : "Dry", botSensorChanges);
-		dbgIdx = 13;
+		dbgIdx = 23;
 #endif // DEBUG_SENSORS
 	} else { // Must be last
 		snprintf(line4, sizeof(line4), "Version: %s", _version);
@@ -1760,73 +1742,94 @@ updateDisplayInfo()
 #endif // USE_DISPLAY
 
 /*
- * setupMqtt
- *
- * This function reconnects to the MQTT broker
+ * initialize and connect MQTT
  */
-boolean
-setupMqtt(void)
+void
+initMqtt(void)
 {
-	bool subscribed = false;
-	char subscriptionDef[100];
-	static int tries = 0;
-	static boolean cleanSession = true;
+	String server, lwt;
 
-	_mqtt.disconnect();		// Just in case.
-
-	// Wait 2 seconds before retrying
-	if (tries != 0) {
-		delay(2000);
+	// Configure MQTT to the address and port specified above
+#ifdef USE_SSL
+	server = "mqtts://";
+#else // USE_SSL
+	server = "mqtt://";
+#endif // USE_SSL
+	server += config.mqttSrvr;
+	if (config.mqttPort != 0) {
+		server += ":";
+		server += config.mqttPort;
 	}
-
-#ifdef DEBUG_OVER_SERIAL
-	Serial.println("Attempting MQTT connection...");
-#endif
-
-	// Attempt to connect
-	char lwt[256];
-	strcpy(lwt, "{ \"systemStatus\": \"offline\"");
+	mqttClient.setServer(server.c_str());
+	mqttClient.setCredentials(config.mqttUser.c_str(), config.mqttPass.c_str());
+	mqttClient.setBufferSize(MAX_MQTT_BUFFER_SIZE);
+#ifdef USE_SSL
+	mqttClient.setCACert(root_ca);
+#endif // USE_SSL
+	lwt = "{ \"systemStatus\": \"offline\"";
 	for (int podNum = 1; podNum <= NUM_PODS; podNum++) {
-		char podLwt[32];
-		sprintf(podLwt, ", \"pod%dStatus\": \"unavailable\"", podNum);
-		strlcat(lwt, podLwt, sizeof(lwt));
+		lwt += ", \"pod";
+		lwt += podNum;
+		lwt += "Status\": \"unavailable\"";
 	}
-	strlcat(lwt, " }", sizeof(lwt));
-	if (_mqtt.connect(myUniqueId, config.mqttUser.c_str(), config.mqttPass.c_str(), statusTopic, 0, true, lwt, cleanSession)) {
-		int numberOfEntities = sizeof(_mqttAllEntities) / sizeof(struct mqttState);
-#ifdef DEBUG_OVER_SERIAL
-		Serial.println("Connected MQTT");
-#endif
+	lwt += " }";
+	mqttClient.setWill(statusTopic, 0, true, lwt.c_str());
+	mqttClient.setCleanSession(true);
 
-		// Special case for Home Assistant
-		sprintf(subscriptionDef, "%s", MQTT_SUB_HOMEASSISTANT);
-		subscribed = _mqtt.subscribe(subscriptionDef, MQTT_SUBSCRIBE_QOS);
-#ifdef DEBUG_OVER_SERIAL
-		Serial.printf("Subscribed to \"%s\" : %d\n", subscriptionDef, subscribed);
-#endif
+	mqttClient.onConnect(onMqttConnect);
+	// And any messages we are subscribed to will be pushed to the mqttCallback function for processing
+	mqttClient.onMessage(mqttCallback);
 
-		for (int i = 0; i < numberOfEntities; i++) {
-			if (_mqttAllEntities[i].subscribe) {
-				sprintf(subscriptionDef, DEVICE_NAME "/%s/%s/command", myUniqueId, _mqttAllEntities[i].mqttName);
-				subscribed = subscribed && _mqtt.subscribe(subscriptionDef, MQTT_SUBSCRIBE_QOS);
+	_mqttPayload = new char[MAX_MQTT_BUFFER_SIZE];
+	emptyPayload();
+
+	// Connect to MQTT
+	mqttClient.connect();
+}
+
+/*
+ * onMqttConnect
+ *
+ * callback for connect/reconnects
+ */
+void
+onMqttConnect(bool sessionPresent)
+{
+	String subscriptionDef;
+	int numberOfEntities = sizeof(_mqttAllEntities) / sizeof(struct mqttState);
+
+#ifdef DEBUG_MQTT
+	mqttConnects++;
+#endif // DEBUG_MQTT
 #ifdef DEBUG_OVER_SERIAL
-				Serial.printf("Subscribed to \"%s\" : %d\n", subscriptionDef, subscribed);
-#endif
-			}
+	Serial.println("MQTT connected.");
+#endif // DEBUG_OVER_SERIAL
+
+	// Special case for Home Assistant
+	subscriptionDef = MQTT_SUB_HOMEASSISTANT;
+	mqttClient.subscribe(subscriptionDef.c_str(), MQTT_SUBSCRIBE_QOS);
+#ifdef DEBUG_OVER_SERIAL
+	Serial.println("Subscribed to " + subscriptionDef);
+#endif // DEBUG_OVER_SERIAL
+
+	for (int i = 0; i < numberOfEntities; i++) {
+		if (_mqttAllEntities[i].subscribe) {
+			subscriptionDef = DEVICE_NAME;
+			subscriptionDef += "/";
+			subscriptionDef += myUniqueId;
+			subscriptionDef += "/";
+			subscriptionDef += _mqttAllEntities[i].mqttName;
+			subscriptionDef += "/command";
+			mqttClient.subscribe(subscriptionDef.c_str(), MQTT_SUBSCRIBE_QOS);
+#ifdef DEBUG_OVER_SERIAL
+			Serial.println("Subscribed to " + subscriptionDef);
+#endif // DEBUG_OVER_SERIAL
 		}
 	}
 
-	// subscribed indicates MQTT overall setup status
-	if (subscribed) {
-		cleanSession = false;  // Once we set up the first time, any reconnects should be persistent sessions
-		tries = 0;
-	} else {
-		tries++;
-#ifdef DEBUG_OVER_SERIAL
-		Serial.printf("MQTT Failed: RC is %d\n", _mqtt.state());
-#endif
-	}
-	return subscribed;
+	// Once we set up the first time, any reconnects should be persistent sessions
+	mqttClient.setCleanSession(false);
+	resendAllData = true;
 }
 
 mqttState *
@@ -1918,11 +1921,6 @@ readEntity(mqttState *singleEntity, char *value, int podNum)
 	case mqttEntityId::entityPodBotSensor:
 		sprintf(value, "%s", pods[podNum].botSensorWet ? "Wet" : "Dry");
 		break;
-#ifdef DEBUG_CALLBACKS
-	case mqttEntityId::entityCallbacks:
-		sprintf(value, "%lu", receivedCallbacks);
-		break;
-#endif // DEBUG_CALLBACKS
 #ifdef DEBUG_FREEMEM
 	case mqttEntityId::entityFreemem:
 		sprintf(value, "%lu", freeMemory());
@@ -2158,9 +2156,6 @@ addConfig(mqttState *singleEntity, int podNum)
 		sprintf(stateAddition, ", \"icon\": \"mdi:memory\"");
 		break;
 #endif // DEBUG_FREEMEM
-#ifdef DEBUG_CALLBACKS
-	case mqttEntityId::entityCallbacks:
-#endif // DEBUG_CALLBACKS
 #ifdef DEBUG_UPTIME
 	case mqttEntityId::entityUptime:
 #endif // DEBUG_UPTIME
@@ -2230,19 +2225,19 @@ addToPayload(const char* addition)
 {
 	int targetRequestedSize = strlen(_mqttPayload) + strlen(addition);
 
-	if (targetRequestedSize > (MAX_MQTT_PAYLOAD_SIZE - 1)) {
-		snprintf(_mqttPayload, MAX_MQTT_PAYLOAD_SIZE, "{\r\n    \"mqttError\": \"Length of payload exceeds %d bytes.  Length would be %d bytes.\"\r\n}",
-			 (MAX_MQTT_PAYLOAD_SIZE - 1), targetRequestedSize);
+	if (targetRequestedSize > (MAX_MQTT_BUFFER_SIZE - 1)) {
+		snprintf(_mqttPayload, MAX_MQTT_BUFFER_SIZE, "{\r\n    \"mqttError\": \"Length of payload exceeds %d bytes.  Length would be %d bytes.\"\r\n}",
+			 (MAX_MQTT_BUFFER_SIZE - 1), targetRequestedSize);
 		return false;
 	} else {
-		strlcat(_mqttPayload, addition, MAX_MQTT_PAYLOAD_SIZE);
+		strlcat(_mqttPayload, addition, MAX_MQTT_BUFFER_SIZE);
 		return true;
 	}
 }
 
 
 void
-sendData()
+sendData(void)
 {
 	int numberOfEntities = sizeof(_mqttAllEntities) / sizeof(struct mqttState);
 
@@ -2252,7 +2247,7 @@ sendData()
 }
 
 void
-sendHaData()
+sendHaData(void)
 {
 	int numberOfEntities = sizeof(_mqttAllEntities) / sizeof(struct mqttState);
 
@@ -2322,26 +2317,28 @@ sendDataFromMqttState(mqttState *singleEntity, bool doHomeAssistant)
  *
  * This function is executed when an MQTT message arrives on a topic that we are subscribed to.
  */
-void mqttCallback(char* topic, byte* message, unsigned int length)
+void
+mqttCallback(char *topic, char *message, int retain, int qos, bool dup)
 {
 	char mqttIncomingPayload[64] = ""; // Should be enough to cover command requests
 	mqttState *mqttEntity = NULL;
+	int length = strlen(message);
 
 #ifdef DEBUG_OVER_SERIAL
 	Serial.printf("Topic: %s\n", topic);
-#endif
+#endif // DEBUG_OVER_SERIAL
 
-#ifdef DEBUG_CALLBACKS
-	receivedCallbacks++;
-#endif // DEBUG_CALLBACKS
+#ifdef DEBUG_MQTT
+	mqttRcvCallbacks++;
+#endif // DEBUG_MQTT
 
 	if ((length == 0) || (length >= sizeof(mqttIncomingPayload))) {
 #ifdef DEBUG_OVER_SERIAL
 		Serial.printf("mqttCallback: bad length: %d\n", length);
-#endif
-#ifdef DEBUG_CALLBACKS
-		badCallbacks++;
-#endif // DEBUG_CALLBACKS
+#endif // DEBUG_OVER_SERIAL
+#ifdef DEBUG_MQTT
+		mqttBadCallbacks++;
+#endif // DEBUG_MQTT
 		return; // We won't be doing anything
 	} else {
 		// Get the payload (ensure NULL termination)
@@ -2350,7 +2347,7 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 #ifdef DEBUG_OVER_SERIAL
 	Serial.printf("Payload: %d\n", length);
 	Serial.println(mqttIncomingPayload);
-#endif
+#endif // DEBUG_OVER_SERIAL
 
 	// Special case for Home Assistant itself
 	if (strcmp(topic, MQTT_SUB_HOMEASSISTANT) == 0) {
@@ -2359,7 +2356,7 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 		} else {
 #ifdef DEBUG_OVER_SERIAL
 			Serial.println("Unknown homeassistant/status: ");
-#endif
+#endif // DEBUG_OVER_SERIAL
 		}
 		return; // No further processing needed.
 	} else {
@@ -2377,9 +2374,9 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 			}
 		}
 		if (mqttEntity == NULL) {
-#ifdef DEBUG_CALLBACKS
-			unknownCallbacks++;
-#endif // DEBUG_CALLBACKS
+#ifdef DEBUG_MQTT
+			mqttUnkCallbacks++;
+#endif // DEBUG_MQTT
 			return; // No further processing possible.
 		}
 	}
@@ -2399,20 +2396,20 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 		default:
 #ifdef DEBUG_OVER_SERIAL
 			Serial.printf("Trying to update an unhandled entity! %d\n", mqttEntity->entityId);
-#endif
-#ifdef DEBUG_CALLBACKS
-			unknownCallbacks++;
-#endif // DEBUG_CALLBACKS
+#endif // DEBUG_OVER_SERIAL
+#ifdef DEBUG_MQTT
+			mqttUnkCallbacks++;
+#endif // DEBUG_MQTT
 			return; // No further processing possible.
 		}
 
 		if (valueProcessingError) {
 #ifdef DEBUG_OVER_SERIAL
 			Serial.printf("Callback for %s with bad value.\n", mqttEntity->mqttName);
-#endif
-#ifdef DEBUG_CALLBACKS
-			badCallbacks++;
-#endif // DEBUG_CALLBACKS
+#endif // DEBUG_OVER_SERIAL
+#ifdef DEBUG_MQTT
+			mqttBadCallbacks++;
+#endif // DEBUG_MQTT
 		} else {
 			// Now set the value and take appropriate action(s)
 			switch (mqttEntity->entityId) {
@@ -2429,17 +2426,17 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 					pods[0].mode = liftModes::modeOff;
 					pods[0].forceMode = false;
 					pods[0].lastUpdate = millis();
-#ifdef DEBUG_CALLBACKS
+#ifdef DEBUG_MQTT
 				} else {
-					badCallbacks++;
-#endif // DEBUG_CALLBACKS
+					mqttBadCallbacks++;
+#endif // DEBUG_MQTT
 				}
 				resendAllData = true;
 				break;
 			default:
 #ifdef DEBUG_OVER_SERIAL
 				Serial.printf("Trying to write an unhandled entity! %d\n", mqttEntity->entityId);
-#endif
+#endif // DEBUG_OVER_SERIAL
 				break;
 			}
 		}
@@ -2455,18 +2452,27 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
  *
  * Sends whatever is in the modular level payload to the specified topic.
  */
-void sendMqtt(const char *topic, bool retain)
+void
+sendMqtt(const char *topic, bool retain)
 {
 	// Attempt a send
-	if (!_mqtt.publish(topic, _mqttPayload, retain)) {
+	int ret = mqttClient.publish(topic, MQTT_PUBLISH_QOS, retain, _mqttPayload);
+	if (ret == -1) {
 #ifdef DEBUG_OVER_SERIAL
 		Serial.printf("MQTT publish failed to %s\n", topic);
 		Serial.println(_mqttPayload);
-#endif
+#endif // DEBUG_OVER_SERIAL
+#ifdef DEBUG_MQTT
+		mqttPublishFail++;
+#endif // DEBUG_MQTT
 	} else {
 #ifdef DEBUG_OVER_SERIAL
-		//Serial.printf("MQTT publish success\n");
-#endif
+//		Serial.printf("MQTT publish success (%d): %s\n", ret, topic);
+//		Serial.println(_mqttPayload);
+#endif // DEBUG_OVER_SERIAL
+#ifdef DEBUG_MQTT
+		mqttPublishSuccess++;
+#endif // DEBUG_MQTT
 	}
 
 	// Empty payload for next use.
@@ -2479,7 +2485,8 @@ void sendMqtt(const char *topic, bool retain)
  *
  * Clears so we start at beginning.
  */
-void emptyPayload()
+void
+emptyPayload(void)
 {
 	_mqttPayload[0] = '\0';
 }
@@ -2491,7 +2498,8 @@ configButtonISR(void)
 }
 
 #ifdef DEBUG_FREEMEM
-uint32_t freeMemory()
+uint32_t
+freeMemory(void)
 {
 	return ESP.getFreeHeap();
 }
