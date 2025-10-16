@@ -2456,7 +2456,7 @@ void
 sendMqtt(const char *topic, bool retain)
 {
 	// Attempt a send
-	int ret = mqttClient.publish(topic, MQTT_PUBLISH_QOS, retain, _mqttPayload
+	int ret = mqttClient.publish(topic, MQTT_PUBLISH_QOS, retain, _mqttPayload,
 #if MQTT_PUBLISH_QOS == 0
 				     false // async
 #else
