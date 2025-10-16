@@ -83,7 +83,7 @@ Author:		David Carrel
 // Set this to 1 or 0
 // Use 0 so if lift is offline, control actions don't arrive later
 #define MQTT_SUBSCRIBE_QOS 1
-#define MQTT_PUBLISH_QOS 1
+#define MQTT_PUBLISH_QOS 0
 // Define this to enable the HA force_update option for many (not all) sensors.
 //#define MQTT_FORCE_UPDATE
 

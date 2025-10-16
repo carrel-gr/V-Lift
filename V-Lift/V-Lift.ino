@@ -50,7 +50,7 @@ podState pods[NUM_PODS + 1];  // 0 is (virtual) system
 
 // WiFi parameters
 #ifdef USE_SSL
-const char* root_ca = ROOT_CA;
+const char* rootCA = ROOT_CA;
 #endif // USE_SSL
 #ifdef DAVE_WIFI_POWER
 wifi_power_t wifiPower = WIFI_POWER_11dBm; // Will bump to max before setting
@@ -1764,7 +1764,7 @@ initMqtt(void)
 	mqttClient.setCredentials(config.mqttUser.c_str(), config.mqttPass.c_str());
 	mqttClient.setBufferSize(MAX_MQTT_BUFFER_SIZE);
 #ifdef USE_SSL
-	mqttClient.setCACert(root_ca);
+	mqttClient.setCACert(rootCA);
 #endif // USE_SSL
 	lwt = "{ \"systemStatus\": \"offline\"";
 	for (int podNum = 1; podNum <= NUM_PODS; podNum++) {
@@ -1773,7 +1773,7 @@ initMqtt(void)
 		lwt += "Status\": \"unavailable\"";
 	}
 	lwt += " }";
-	mqttClient.setWill(statusTopic, 0, true, lwt.c_str());
+	mqttClient.setWill(statusTopic, 1, true, lwt.c_str());
 	mqttClient.setCleanSession(true);
 
 	mqttClient.onConnect(onMqttConnect);
@@ -2456,7 +2456,13 @@ void
 sendMqtt(const char *topic, bool retain)
 {
 	// Attempt a send
-	int ret = mqttClient.publish(topic, MQTT_PUBLISH_QOS, retain, _mqttPayload);
+	int ret = mqttClient.publish(topic, MQTT_PUBLISH_QOS, retain, _mqttPayload
+#if MQTT_PUBLISH_QOS == 0
+				     false // async
+#else
+				     true  // async
+#endif
+		);
 	if (ret == -1) {
 #ifdef DEBUG_OVER_SERIAL
 		Serial.printf("MQTT publish failed to %s\n", topic);
