@@ -58,16 +58,24 @@ wifi_power_t wifiPower = WIFI_POWER_11dBm; // Will bump to max before setting
 
 // MQTT parameters
 PsychicMqttClient mqttClient;
-char* _mqttPayload = NULL;
+typedef struct publish {
+	volatile uint16_t packetId;
+	char topic[128];
+	char payload[MAX_MQTT_BUFFER_SIZE];
+} publishEntry;
+publishEntry *mqttPublishArray = NULL;
+#define MQTT_NUM_PUBLISH_PKTS 16
 #ifdef DEBUG_MQTT
 uint32_t mqttRcvCallbacks = 0;
 uint32_t mqttUnkCallbacks = 0;
 uint32_t mqttBadCallbacks = 0;
+uint32_t mqttPubCallbacks = 0;
 uint32_t mqttConnects = 0;
 uint32_t mqttPublishSuccess = 0;
 uint32_t mqttPublishFail = 0;
+uint32_t mqttPublishNoMem = 0;
 #endif // DEBUG_MQTT
-bool resendAllData = false;
+volatile bool resendAllData = false;
 
 // OTA setup
 WebServer *otaServer = NULL;
@@ -107,30 +115,35 @@ uint32_t wifiReconnects = 0;
 /*
  * Home Assistant auto-discovered values
  */
-static struct mqttState _mqttAllEntities[] =
+static struct mqttState _mqttSysEntities[] =
 {
-	// Entity,                                "Name",           allPods, Subscribe, Retain, HA Class
+	// Entity,                                "Name",           Subscribe, Retain, HA Class
 #ifdef DEBUG_FREEMEM
-	{ mqttEntityId::entityFreemem,            "freemem",           false, false, false, homeAssistantClass::haClassInfo },
+	{ mqttEntityId::entityFreemem,            "freemem",            false, false, homeAssistantClass::haClassInfo },
 #endif
 #ifdef DEBUG_WIFI_DAVE_HACK
-	{ mqttEntityId::entityRSSI,               "RSSI",              false, false, false, homeAssistantClass::haClassInfo },
-	{ mqttEntityId::entityBSSID,              "BSSID",             false, false, false, homeAssistantClass::haClassInfo },
-	{ mqttEntityId::entityTxPower,            "TX_Power",          false, false, false, homeAssistantClass::haClassInfo },
-	{ mqttEntityId::entityWifiRecon,          "reconnects",        false, false, false, homeAssistantClass::haClassInfo },
+	{ mqttEntityId::entityRSSI,               "RSSI",               false, false, homeAssistantClass::haClassInfo },
+	{ mqttEntityId::entityBSSID,              "BSSID",              false, false, homeAssistantClass::haClassInfo },
+	{ mqttEntityId::entityTxPower,            "TX_Power",           false, false, homeAssistantClass::haClassInfo },
+	{ mqttEntityId::entityWifiRecon,          "reconnects",         false, false, homeAssistantClass::haClassInfo },
 #endif // DEBUG_WIFI
 #ifdef DEBUG_UPTIME
-	{ mqttEntityId::entityUptime,             "Uptime",            false, false, false, homeAssistantClass::haClassDuration },
+	{ mqttEntityId::entityUptime,             "Uptime",             false, false, homeAssistantClass::haClassDuration },
 #endif // DEBUG_UPTIME
-	{ mqttEntityId::entityVersion,            "Version",           true,  false, true,  homeAssistantClass::haClassInfo },
-	{ mqttEntityId::entitySystemMode,         "System_Mode",       false, true,  true,  homeAssistantClass::haClassSelect },
-	{ mqttEntityId::entityPodMode,            "Mode",              true,  false, true,  homeAssistantClass::haClassInfo },
-	{ mqttEntityId::entityPodAction,          "Action",            true,  false, true,  homeAssistantClass::haClassInfo },
-	{ mqttEntityId::entityPodPosition,        "Position",          true,  false, true,  homeAssistantClass::haClassInfo },
-	{ mqttEntityId::entityPodBatPct,          "Battery",           true,  false, true,  homeAssistantClass::haClassBattery },
-	{ mqttEntityId::entityPodBatVlt,          "Battery_Voltage",   false, false, true,  homeAssistantClass::haClassVoltage },
-	{ mqttEntityId::entityPodTopSensor,       "Top_Sensor",        true,  false, true,  homeAssistantClass::haClassMoisture },
-	{ mqttEntityId::entityPodBotSensor,       "Bottom_Sensor",     true,  false, true,  homeAssistantClass::haClassMoisture }
+	{ mqttEntityId::entitySystemMode,         "System_Mode",        true,  true,  homeAssistantClass::haClassSelect },
+};
+
+static struct mqttState _mqttPodEntities[] =
+{
+	// Entity,                                "Name",           Subscribe, Retain, HA Class
+	{ mqttEntityId::entityVersion,            "Version",            false, true,  homeAssistantClass::haClassInfo },
+	{ mqttEntityId::entityPodMode,            "Mode",               false, true,  homeAssistantClass::haClassInfo },
+	{ mqttEntityId::entityPodAction,          "Action",             false, true,  homeAssistantClass::haClassInfo },
+	{ mqttEntityId::entityPodPosition,        "Position",           false, true,  homeAssistantClass::haClassInfo },
+	{ mqttEntityId::entityPodBatPct,          "Battery",            false, true,  homeAssistantClass::haClassBattery },
+	{ mqttEntityId::entityPodBatVlt,          "Voltage",            false, true,  homeAssistantClass::haClassVoltage },
+	{ mqttEntityId::entityPodTopSensor,       "Top_Sensor",         false, true,  homeAssistantClass::haClassMoisture },
+	{ mqttEntityId::entityPodBotSensor,       "Bottom_Sensor",      false, true,  homeAssistantClass::haClassMoisture }
 };
 
 // These timers are used in the main loop.
@@ -592,7 +605,6 @@ loop ()
 
 	// MQTT/P2P might have asynchronously updated pods[0].mode or buttons
 	if (myPodNum == 1) {
-		pods[0].batteryVolts = pods[1].batteryVolts;  // DAVE - hack.  Clean up
 		getRemotePodStatus();
 		readSystemModeFromButtons();  // Set system (pods[0]) mode based on buttons and system action
 	} else {
@@ -627,15 +639,10 @@ loop ()
 		}
 
 		// Send status/keepalive
-		if (mqttIsOn && checkTimer(&lastRunStatus, STATUS_INTERVAL)) {
-			sendStatus();
-		}
-
-		if (mqttIsOn && checkTimer(&lastRunSendHaData, HA_DATA_INTERVAL)) {
-			sendHaData();
-		}
-		if (mqttIsOn && checkTimer(&lastRunSendData, DATA_INTERVAL)) {
-			sendData();
+		if (mqttIsOn) {
+			sendStatus(&lastRunStatus);
+			sendHaData(&lastRunSendHaData);
+			sendData(&lastRunSendData);
 		}
 	} else {
 		if (wifiIsOn && checkTimer(&lastRunPodData, POD2POD_DATA_INTERVAL)) {
@@ -703,18 +710,27 @@ parseStr (char *data, const char *key, char *dest, size_t destLen)
 	}
 }
 
-bool
+int
 parseBool (char *data, const char *key)
 {
 	char *valueStr;
+	int ret;
 
 	valueStr = strstr(data, key);
 	if (valueStr == NULL) {
-		return false;
+		return -1;
 	}
 	valueStr += strlen(key);
 
-	return *valueStr == '1';
+	if (*valueStr == '1') {
+		ret = 1;
+	} else if (*valueStr == '0') {
+		ret = 0;
+	} else {
+		ret = -1;
+	}
+
+	return ret;
 }
 
 #define UDP_BUF_SIZ 128
@@ -748,13 +764,21 @@ getSystemModeFromNumberOne (void)
 			podNum = parseInt(buf, "PN=");
 			if (podNum == 0) {
 				liftModes mode = (liftModes)parseInt(buf, "MO=");
-				if (mode != pods[podNum].mode) {
-					resendAllData = true;
+				int fm = parseBool(buf, "FM=");
+				switch (mode) {
+				case liftModes::modeUp:
+				case liftModes::modeDown:
+				case liftModes::modeOff:
+					if (fm != -1) {
+						if (mode != pods[podNum].mode) {
+							resendAllData = true;
+						}
+						pods[podNum].mode = mode;
+//						pods[podNum].action = (liftActions)parseInt(buf, "AC=");
+						pods[podNum].forceMode = fm == 1 ? true : false;
+						pods[podNum].lastUpdate = millis();
+					}
 				}
-				pods[podNum].mode = mode;
-//				pods[podNum].action = (liftActions)parseInt(buf, "AC=");
-				pods[podNum].forceMode = parseBool(buf, "FM=");
-				pods[podNum].lastUpdate = millis();
 			}
 		}
 		packetSize = udp.parsePacket(); // Try to get another.
@@ -811,31 +835,62 @@ getRemotePodStatus (void)
 #endif // DEBUG_UDP
 			podNum = parseInt(buf, "PN=");
 			if (podNum > 1 && podNum <= NUM_PODS) {
+				bool goodUpdate = true;
 				pods[podNum].batteryPct = parseInt(buf, "BP=");
 				{
+					int batteryMilliVolts = parseInt(buf, "BM=");
+					if (batteryMilliVolts == -1) {
+						pods[podNum].batteryVolts = (float)-1;
+					} else {
+						pods[podNum].batteryVolts = (float)batteryMilliVolts / 1000.0;
+					}
+				}
+				{
 					liftModes mode = (liftModes)parseInt(buf, "MO=");
-					if (mode != pods[podNum].mode) resendAllData = true;
-					pods[podNum].mode = mode;
+					if (mode == -1) {
+						goodUpdate = false;
+					} else {
+						if (mode != pods[podNum].mode) resendAllData = true;
+						pods[podNum].mode = mode;
+					}
 				}
 				{
 					liftActions action = (liftActions)parseInt(buf, "AC=");
-					if (action != pods[podNum].action) resendAllData = true;
-					pods[podNum].action = action;
+					if (action == -1) {
+						goodUpdate = false;
+					} else {
+						if (action != pods[podNum].action) resendAllData = true;
+						pods[podNum].action = action;
+					}
 				}
 				{
 					liftPositions position = (liftPositions)parseInt(buf, "PO=");
-					if (position != pods[podNum].position) resendAllData = true;
-					pods[podNum].position = position;
+					if (position == -1) {
+						goodUpdate = false;
+					} else {
+						if (position != pods[podNum].position) resendAllData = true;
+						pods[podNum].position = position;
+					}
 				}
 				{
-					bool ts = parseBool(buf, "TS=");
-					if (ts != pods[podNum].topSensorWet) resendAllData = true;
-					pods[podNum].topSensorWet = ts;
+					int val = parseBool(buf, "TS=");
+					if (val == -1) {
+						goodUpdate = false;
+					} else {
+						bool ts = (val == 1);
+						if (ts != pods[podNum].topSensorWet) resendAllData = true;
+						pods[podNum].topSensorWet = ts;
+					}
 				}
 				{
-					bool bs = parseBool(buf, "BS=");
-					if (bs != pods[podNum].botSensorWet) resendAllData = true;
-					pods[podNum].botSensorWet = bs;
+					int val = parseBool(buf, "BS=");
+					if (val == -1) {
+						goodUpdate = false;
+					} else {
+						bool bs = (val == 1);
+						if (bs != pods[podNum].botSensorWet) resendAllData = true;
+						pods[podNum].botSensorWet = bs;
+					}
 				}
 				{
 					buttonState tmpButtons = (buttonState)parseInt(buf, "FB=");
@@ -856,7 +911,9 @@ getRemotePodStatus (void)
 					}
 				}
 				parseStr(buf, "VV=", pods[podNum].version, sizeof(pods[podNum].version));
-				pods[podNum].lastUpdate = millis();
+				if (goodUpdate) {
+					pods[podNum].lastUpdate = millis();
+				}
 			}
 		}
 		packetSize = udp.parsePacket(); // Try to get another.
@@ -869,7 +926,7 @@ sendPodInfoToNumberOne (void)
 	IPAddress numOneIP(192, 168, PRIV_WIFI_SUBNET, 1);
 
 	udp.beginPacket(numOneIP, PRIV_UDP_PORT);
-	udp.printf("PN=%d,BP=%d,MO=%d,AC=%d,PO=%d,TS=%c,BS=%c,FB=%d,VV=%s", myPodNum, myPod->batteryPct,
+	udp.printf("PN=%d,BP=%d,BM=%d,MO=%d,AC=%d,PO=%d,TS=%c,BS=%c,FB=%d,VV=%s", myPodNum, myPod->batteryPct, (int)(myPod->batteryVolts * 1000.0),
 		   myPod->mode, myPod->action, myPod->position, myPod->topSensorWet ? '1' : '0', myPod->botSensorWet ? '1' : '0',
 		   remoteButtons, myPod->version);
 	if (remoteButtons != buttonState::nothingPressed) {
@@ -1219,8 +1276,7 @@ readPodButtons(void)
 void
 readBattery(void)
 {
-	float volts, pct;
-	uint32_t mvBatt = 0;
+	float volts, pct, mvBatt = 0.0;
 
 #define BAT_NUM_SAMPLES 16
 	for (int i = 0; i < BAT_NUM_SAMPLES; i++) {
@@ -1698,13 +1754,13 @@ updateDisplayInfo()
 #endif // DEBUG_WIFI
 #ifdef DEBUG_MQTT
 	} else if (dbgIdx < 6) {
-		snprintf(line4, sizeof(line4), "MQTT CB: %lu/%lu/%lu", mqttRcvCallbacks, mqttUnkCallbacks, mqttBadCallbacks);
+		snprintf(line4, sizeof(line4), "MQTT CB: %lu/%lu/%lu/%lu", mqttRcvCallbacks, mqttUnkCallbacks, mqttBadCallbacks, mqttPubCallbacks);
 		dbgIdx = 6;
 	} else if (dbgIdx < 9) {
 		snprintf(line4, sizeof(line4), "MQTT conn: %lu", mqttConnects);
 		dbgIdx = 9;
 	} else if (dbgIdx < 10) {
-		snprintf(line4, sizeof(line4), "MQTT pub: %lu/%lu", mqttPublishSuccess, mqttPublishFail);
+		snprintf(line4, sizeof(line4), "MQTT pub: %lu/%lu/%lu", mqttPublishSuccess, mqttPublishFail, mqttPublishNoMem);
 		dbgIdx = 10;
 #endif // DEBUG_MQTT
 #ifdef DEBUG_UPTIME
@@ -1762,6 +1818,7 @@ initMqtt(void)
 	}
 	mqttClient.setServer(server.c_str());
 	mqttClient.setCredentials(config.mqttUser.c_str(), config.mqttPass.c_str());
+	mqttClient.setClientId(myUniqueId);
 	mqttClient.setBufferSize(MAX_MQTT_BUFFER_SIZE);
 #ifdef USE_SSL
 	mqttClient.setCACert(rootCA);
@@ -1777,14 +1834,38 @@ initMqtt(void)
 	mqttClient.setCleanSession(true);
 
 	mqttClient.onConnect(onMqttConnect);
+	mqttClient.onPublish(onMqttPublish);
 	// And any messages we are subscribed to will be pushed to the mqttCallback function for processing
 	mqttClient.onMessage(mqttCallback);
 
-	_mqttPayload = new char[MAX_MQTT_BUFFER_SIZE];
-	emptyPayload();
+	mqttPublishArray = new publishEntry[MQTT_NUM_PUBLISH_PKTS];
+	if (mqttPublishArray == NULL) {
+#ifdef DEBUG_OVER_SERIAL
+		Serial.println("Failed to allocate publish array!!");
+#endif // DEBUG_OVER_SERIAL
+		delay(1000);
+		ESP.restart();
+	} else {
+		for (int i = 0; i < MQTT_NUM_PUBLISH_PKTS; i++) {
+			clearPublishEntry(&mqttPublishArray[i]);
+		}
+	}
 
 	// Connect to MQTT
 	mqttClient.connect();
+}
+
+void
+onMqttPublish(uint16_t packetId)
+{
+	for (int i = 0; i < MQTT_NUM_PUBLISH_PKTS; i++) {
+		if (mqttPublishArray[i].packetId == packetId) {
+			clearPublishEntry(&mqttPublishArray[i]);
+		}
+	}
+#ifdef DEBUG_MQTT
+	mqttPubCallbacks++;
+#endif // DEBUG_MQTT
 }
 
 /*
@@ -1796,7 +1877,7 @@ void
 onMqttConnect(bool sessionPresent)
 {
 	String subscriptionDef;
-	int numberOfEntities = sizeof(_mqttAllEntities) / sizeof(struct mqttState);
+	int numberOfEntities = sizeof(_mqttSysEntities) / sizeof(struct mqttState);
 
 #ifdef DEBUG_MQTT
 	mqttConnects++;
@@ -1813,12 +1894,12 @@ onMqttConnect(bool sessionPresent)
 #endif // DEBUG_OVER_SERIAL
 
 	for (int i = 0; i < numberOfEntities; i++) {
-		if (_mqttAllEntities[i].subscribe) {
+		if (_mqttSysEntities[i].subscribe) {
 			subscriptionDef = DEVICE_NAME;
 			subscriptionDef += "/";
 			subscriptionDef += myUniqueId;
 			subscriptionDef += "/";
-			subscriptionDef += _mqttAllEntities[i].mqttName;
+			subscriptionDef += _mqttSysEntities[i].mqttName;
 			subscriptionDef += "/command";
 			mqttClient.subscribe(subscriptionDef.c_str(), MQTT_SUBSCRIBE_QOS);
 #ifdef DEBUG_OVER_SERIAL
@@ -1835,23 +1916,11 @@ onMqttConnect(bool sessionPresent)
 mqttState *
 lookupSubscription(char *entityName)
 {
-	int numberOfEntities = sizeof(_mqttAllEntities) / sizeof(struct mqttState);
+	int numberOfEntities = sizeof(_mqttSysEntities) / sizeof(struct mqttState);
 	for (int i = 0; i < numberOfEntities; i++) {
-		if (_mqttAllEntities[i].subscribe &&
-		    !strcmp(entityName, _mqttAllEntities[i].mqttName)) {
-			return &_mqttAllEntities[i];
-		}
-	}
-	return NULL;
-}
-
-mqttState *
-lookupEntity(mqttEntityId entityId)
-{
-	int numberOfEntities = sizeof(_mqttAllEntities) / sizeof(struct mqttState);
-	for (int i = 0; i < numberOfEntities; i++) {
-		if (_mqttAllEntities[i].entityId == entityId) {
-			return &_mqttAllEntities[i];
+		if (_mqttSysEntities[i].subscribe &&
+		    !strcmp(entityName, _mqttSysEntities[i].mqttName)) {
+			return &_mqttSysEntities[i];
 		}
 	}
 	return NULL;
@@ -1953,7 +2022,7 @@ readEntity(mqttState *singleEntity, char *value, int podNum)
 #endif // DEBUG_WIFI
 	}
 
-	if (singleEntity->allPods && !POD_DATA_IS_FRESH(podNum)) {
+	if ((podNum != 0) && !POD_DATA_IS_FRESH(podNum)) {
 		strcpy(value, "unavailable");
 	}
 }
@@ -1964,7 +2033,7 @@ readEntity(mqttState *singleEntity, char *value, int podNum)
  * Query the handled entity in the usual way, and add the cleansed output to the buffer
  */
 boolean
-addState(mqttState *singleEntity, int podNum)
+addState(publishEntry *publish, mqttState *singleEntity, int podNum)
 {
 	char response[MAX_FORMATTED_DATA_VALUE_LENGTH];
 	boolean result;
@@ -1972,17 +2041,28 @@ addState(mqttState *singleEntity, int podNum)
 	// Read the register(s)/data
 	readEntity(singleEntity, &response[0], podNum);
 
-	result = addToPayload(response);
+	result = addToPayload(publish, response);
 
 	return result;
 }
 
 void
-sendStatus(void)
+sendStatus(unsigned long *lastRun)
 {
-	char stateAddition[512] = "";
+	char stateAddition[256] = "";
+	publishEntry *publish;
 
-	emptyPayload();
+	if (!checkTimer(lastRun, STATUS_INTERVAL)) {
+		return;
+	}
+
+	publish = findFreePublish();
+	if (publish == NULL) {
+		*lastRun = 0;
+		return;
+	}
+
+	strlcat(publish->topic, statusTopic, sizeof(publish->topic));
 
 	snprintf(stateAddition, sizeof(stateAddition), "{ \"systemStatus\": \"online\"");
 	for (int podNum = 1; podNum <= NUM_PODS; podNum++) {
@@ -1992,27 +2072,30 @@ sendStatus(void)
 		strlcat(stateAddition, moreState, sizeof(stateAddition));
 	}
 	strlcat(stateAddition, " }", sizeof(stateAddition));
-	if (!addToPayload(stateAddition)) {
+	if (!addToPayload(publish, stateAddition)) {
+		*lastRun = 0;
 		return;
 	}
 
-	sendMqtt(statusTopic, MQTT_RETAIN);
+	if (!sendMqtt(publish, MQTT_RETAIN)) {
+		*lastRun = 0;
+	}
 }
 
 boolean
-addConfig(mqttState *singleEntity, int podNum)
+addConfig(publishEntry *publish, mqttState *singleEntity, int podNum)
 {
 	char stateAddition[1024] = "";
 	char prettyName[MAX_MQTT_NAME_LENGTH + 8], mqttName[MAX_MQTT_NAME_LENGTH + 8];
 
-	if (singleEntity->allPods) {
+	if (podNum != 0) {
 		snprintf(mqttName, sizeof(mqttName), "Pod%d_%s", podNum, singleEntity->mqttName);
 	} else {
 		strlcpy(mqttName, singleEntity->mqttName, sizeof(mqttName));
 	}
 
 	sprintf(stateAddition, "{");
-	if (!addToPayload(stateAddition)) {
+	if (!addToPayload(publish, stateAddition)) {
 		return false;
 	}
 
@@ -2031,7 +2114,7 @@ addConfig(mqttState *singleEntity, int podNum)
 		sprintf(stateAddition, "\"component\": \"sensor\"");
 		break;
 	}
-	if (!addToPayload(stateAddition)) {
+	if (!addToPayload(publish, stateAddition)) {
 		return false;
 	}
 
@@ -2040,7 +2123,7 @@ addConfig(mqttState *singleEntity, int podNum)
 		 " \"name\": \"%s\", \"model\": \"V-Lift\", \"manufacturer\": \"Sunstream\","
 		 " \"identifiers\": [\"%s\"]}",
 		 myUniqueId, myUniqueId);
-	if (!addToPayload(stateAddition)) {
+	if (!addToPayload(publish, stateAddition)) {
 		return false;
 	}
 
@@ -2049,12 +2132,12 @@ addConfig(mqttState *singleEntity, int podNum)
 		*ch = ' ';
 	}
 	snprintf(stateAddition, sizeof(stateAddition), ", \"name\": \"%s\"", prettyName);
-	if (!addToPayload(stateAddition)) {
+	if (!addToPayload(publish, stateAddition)) {
 		return false;
 	}
 
 	snprintf(stateAddition, sizeof(stateAddition), ", \"unique_id\": \"%s_%s\"", myUniqueId, mqttName);
-	if (!addToPayload(stateAddition)) {
+	if (!addToPayload(publish, stateAddition)) {
 		return false;
 	}
 
@@ -2119,7 +2202,7 @@ addConfig(mqttState *singleEntity, int podNum)
 		break;
 	}
 	if (strlen(stateAddition) != 0) {
-		if (!addToPayload(stateAddition)) {
+		if (!addToPayload(publish, stateAddition)) {
 			return false;
 		}
 	}
@@ -2167,14 +2250,14 @@ addConfig(mqttState *singleEntity, int podNum)
 		break;
 	}
 	if (strlen(stateAddition) != 0) {
-		if (!addToPayload(stateAddition)) {
+		if (!addToPayload(publish, stateAddition)) {
 			return false;
 		}
 	}
 
 	if (singleEntity->subscribe) {
 		sprintf(stateAddition, ", \"qos\": %d", MQTT_SUBSCRIBE_QOS);
-		if (!addToPayload(stateAddition)) {
+		if (!addToPayload(publish, stateAddition)) {
 			return false;
 		}
 	}
@@ -2186,19 +2269,19 @@ addConfig(mqttState *singleEntity, int podNum)
 			 myUniqueId, mqttName);
 		break;
 	}
-	if (!addToPayload(stateAddition)) {
+	if (!addToPayload(publish, stateAddition)) {
 		return false;
 	}
 
 	if (singleEntity->subscribe) {
 		sprintf(stateAddition, ", \"command_topic\": \"" DEVICE_NAME "/%s/%s/command\"",
 			myUniqueId, mqttName);
-		if (!addToPayload(stateAddition)) {
+		if (!addToPayload(publish, stateAddition)) {
 			return false;
 		}
 	}
 
-	if (singleEntity->allPods) {
+	if (podNum != 0) {
 		snprintf(stateAddition, sizeof(stateAddition),
 			 ", \"availability_template\": \"{{ \\\"online\\\" if value_json.pod%dStatus == \\\"online\\\" else \\\"offline\\\" }}\""
 			 ", \"availability_topic\": \"%s\"", podNum, statusTopic);
@@ -2207,12 +2290,12 @@ addConfig(mqttState *singleEntity, int podNum)
 			 ", \"availability_template\": \"{{ value_json.systemStatus | default(\\\"\\\") }}\""
 			 ", \"availability_topic\": \"%s\"", statusTopic);
 	}
-	if (!addToPayload(stateAddition)) {
+	if (!addToPayload(publish, stateAddition)) {
 		return false;
 	}
 
 	strcpy(stateAddition, "}");
-	if (!addToPayload(stateAddition)) {
+	if (!addToPayload(publish, stateAddition)) {
 		return false;
 	}
 
@@ -2221,94 +2304,151 @@ addConfig(mqttState *singleEntity, int podNum)
 
 
 boolean
-addToPayload(const char* addition)
+addToPayload(publishEntry *publish, const char* addition)
 {
-	int targetRequestedSize = strlen(_mqttPayload) + strlen(addition);
+	int targetRequestedSize = strlen(publish->payload) + strlen(addition);
 
-	if (targetRequestedSize > (MAX_MQTT_BUFFER_SIZE - 1)) {
-		snprintf(_mqttPayload, MAX_MQTT_BUFFER_SIZE, "{\r\n    \"mqttError\": \"Length of payload exceeds %d bytes.  Length would be %d bytes.\"\r\n}",
-			 (MAX_MQTT_BUFFER_SIZE - 1), targetRequestedSize);
+	if (targetRequestedSize > (sizeof(publish->payload) - 1)) {
+		snprintf(publish->payload, sizeof(publish->payload), "{\r\n    \"mqttError\": \"Length of payload exceeds %d bytes.  Length would be %d bytes.\"\r\n}",
+			 (sizeof(publish->payload) - 1), targetRequestedSize);
 		return false;
 	} else {
-		strlcat(_mqttPayload, addition, MAX_MQTT_BUFFER_SIZE);
+		strlcat(publish->payload, addition, sizeof(publish->payload));
 		return true;
 	}
 }
 
-
+#define MQTT_PUBLISH_BURST 4
 void
-sendData(void)
+sendData(unsigned long *lastRun)
 {
-	int numberOfEntities = sizeof(_mqttAllEntities) / sizeof(struct mqttState);
+	static int nextToSend = 0;
+	int curSent = 0;
+	int numSysEntities = sizeof(_mqttSysEntities) / sizeof(struct mqttState);
+	int numPodEntities = sizeof(_mqttPodEntities) / sizeof(struct mqttState);
+	int totalEntities = numSysEntities + (numPodEntities * NUM_PODS);
 
-	for (int i = 0; i < numberOfEntities; i++) {
-		sendDataFromMqttState(&_mqttAllEntities[i], false);
+	if ((nextToSend >= totalEntities) && checkTimer(lastRun, DATA_INTERVAL)) {
+		nextToSend = 0;  // Only restart if we finished previous run.
+	}
+
+	for (int i = nextToSend; (i < totalEntities) && (curSent < MQTT_PUBLISH_BURST); i++) {
+		int podNum, entityIdx;
+		struct mqttState *entity;
+		publishEntry *publish = findFreePublish();
+
+		if (publish == NULL) {
+			break;
+		}
+
+		if (i < numSysEntities) {
+			podNum = 0;
+			entityIdx = i;
+			entity = &_mqttSysEntities[entityIdx];
+		} else {
+			podNum = ((i - numSysEntities) / numPodEntities) + 1;
+			entityIdx = (i - numSysEntities) % numPodEntities;
+			entity = &_mqttPodEntities[entityIdx];
+		}
+
+		if (!sendDataFromMqttState(publish, entity, false, podNum)) {
+			clearPublishEntry(publish);
+			break;
+		}
+
+		nextToSend++;
+		curSent++;
 	}
 }
 
 void
-sendHaData(void)
+sendHaData(unsigned long *lastRun)
 {
-	int numberOfEntities = sizeof(_mqttAllEntities) / sizeof(struct mqttState);
+	static int nextToSend = 0;
+	int curSent = 0;
+	int numSysEntities = sizeof(_mqttSysEntities) / sizeof(struct mqttState);
+	int numPodEntities = sizeof(_mqttPodEntities) / sizeof(struct mqttState);
+	int totalEntities = numSysEntities + (numPodEntities * NUM_PODS);
 
-	for (int i = 0; i < numberOfEntities; i++) {
-		sendDataFromMqttState(&_mqttAllEntities[i], true);
+	if ((nextToSend >= totalEntities) && checkTimer(lastRun, HA_DATA_INTERVAL)) {
+		nextToSend = 0;  // Only restart if we finished previous run.
+	}
+
+	for (int i = nextToSend; (i < totalEntities) && (curSent < MQTT_PUBLISH_BURST); i++) {
+		int podNum, entityIdx;
+		struct mqttState *entity;
+		publishEntry *publish = findFreePublish();
+
+		if (publish == NULL) {
+			break;
+		}
+
+		if (i < numSysEntities) {
+			podNum = 0;
+			entityIdx = i;
+			entity = &_mqttSysEntities[entityIdx];
+		} else {
+			podNum = ((i - numSysEntities) / numPodEntities) + 1;
+			entityIdx = (i - numSysEntities) % numPodEntities;
+			entity = &_mqttPodEntities[entityIdx];
+		}
+
+		if (!sendDataFromMqttState(publish, entity, true, podNum)) {
+			clearPublishEntry(publish);
+			break;
+		}
+
+		nextToSend++;
+		curSent++;
 	}
 }
 
-void
-sendDataFromMqttState(mqttState *singleEntity, bool doHomeAssistant)
+bool
+sendDataFromMqttState(publishEntry *publish, mqttState *singleEntity, bool doHomeAssistant, int podNum)
 {
-	char topic[256];
-	boolean result;
-	int loopStart, loopLast;
+	boolean result = false;
 
 	if (singleEntity == NULL)
-		return;
+		return false;
 
-	loopStart = singleEntity->allPods ? 1 : 0;
-	loopLast =  singleEntity->allPods ? NUM_PODS : 0;
-	for (int podNum = loopStart; podNum <= loopLast; podNum++) {
-		emptyPayload();
-
-		if (doHomeAssistant) {
-			const char *entityType;
-			switch (singleEntity->haClass) {
-			case homeAssistantClass::haClassBox:
-//			case homeAssistantClass::haClassNumber:
-				entityType = "number";
-				break;
-			case homeAssistantClass::haClassSelect:
-				entityType = "select";
+	if (doHomeAssistant) {
+		const char *entityType;
+		switch (singleEntity->haClass) {
+		case homeAssistantClass::haClassBox:
+//		case homeAssistantClass::haClassNumber:
+			entityType = "number";
 			break;
-			case homeAssistantClass::haClassMoisture:
-				entityType = "binary_sensor";
-				break;
-			default:
-				entityType = "sensor";
-				break;
-			}
+		case homeAssistantClass::haClassSelect:
+			entityType = "select";
+		break;
+		case homeAssistantClass::haClassMoisture:
+			entityType = "binary_sensor";
+			break;
+		default:
+			entityType = "sensor";
+			break;
+		}
 
-			if (singleEntity->allPods) {
-				snprintf(topic, sizeof(topic), "homeassistant/%s/%s/Pod%d_%s/config", entityType, myUniqueId, podNum, singleEntity->mqttName);
-			} else {
-				snprintf(topic, sizeof(topic), "homeassistant/%s/%s/%s/config", entityType, myUniqueId, singleEntity->mqttName);
-			}
-			result = addConfig(singleEntity, podNum);
+		if (podNum == 0) {
+			snprintf(publish->topic, sizeof(publish->topic), "homeassistant/%s/%s/%s/config", entityType, myUniqueId, singleEntity->mqttName);
 		} else {
-			if (singleEntity->allPods) {
-				snprintf(topic, sizeof(topic), DEVICE_NAME "/%s/Pod%d_%s/state", myUniqueId, podNum, singleEntity->mqttName);
-			} else {
-				snprintf(topic, sizeof(topic), DEVICE_NAME "/%s/%s/state", myUniqueId, singleEntity->mqttName);
-			}
-			result = addState(singleEntity, podNum);
+			snprintf(publish->topic, sizeof(publish->topic), "homeassistant/%s/%s/Pod%d_%s/config", entityType, myUniqueId, podNum, singleEntity->mqttName);
 		}
-
-		if (result) {
-			// And send
-			sendMqtt(topic, singleEntity->retain ? MQTT_RETAIN : false);
+		result = addConfig(publish, singleEntity, podNum);
+	} else {
+		if (podNum == 0) {
+			snprintf(publish->topic, sizeof(publish->topic), DEVICE_NAME "/%s/%s/state", myUniqueId, singleEntity->mqttName);
+		} else {
+			snprintf(publish->topic, sizeof(publish->topic), DEVICE_NAME "/%s/Pod%d_%s/state", myUniqueId, podNum, singleEntity->mqttName);
 		}
+		result = addState(publish, singleEntity, podNum);
 	}
+
+	if (result) {
+		// And send
+		result = sendMqtt(publish, singleEntity->retain ? MQTT_RETAIN : false);
+	}
+	return result;
 }
 
 
@@ -2452,49 +2592,73 @@ mqttCallback(char *topic, char *message, int retain, int qos, bool dup)
  *
  * Sends whatever is in the modular level payload to the specified topic.
  */
-void
-sendMqtt(const char *topic, bool retain)
+bool
+sendMqtt(publishEntry *publish, bool retain)
 {
+	bool ret;
 	// Attempt a send
-	int ret = mqttClient.publish(topic, MQTT_PUBLISH_QOS, retain, _mqttPayload,
+	int packetId = mqttClient.publish(publish->topic, MQTT_PUBLISH_QOS, retain, publish->payload, strlen(publish->payload),
 #if MQTT_PUBLISH_QOS == 0
-				     false // async
+					  false // NOT async
 #else
-				     true  // async
+					  true  // async
 #endif
 		);
-	if (ret == -1) {
+	if (packetId == -1) {
+		ret = false;
 #ifdef DEBUG_OVER_SERIAL
-		Serial.printf("MQTT publish failed to %s\n", topic);
-		Serial.println(_mqttPayload);
+		Serial.printf("MQTT publish failed to %s\n", publish->topic);
+		Serial.println(publish->payload);
 #endif // DEBUG_OVER_SERIAL
 #ifdef DEBUG_MQTT
 		mqttPublishFail++;
 #endif // DEBUG_MQTT
 	} else {
+		ret = true;
+		publish->packetId = packetId;
 #ifdef DEBUG_OVER_SERIAL
-//		Serial.printf("MQTT publish success (%d): %s\n", ret, topic);
-//		Serial.println(_mqttPayload);
+//		Serial.printf("MQTT publish success (%d): %s\n", ret, publish->topic);
+//		Serial.println(publish->payload);
 #endif // DEBUG_OVER_SERIAL
 #ifdef DEBUG_MQTT
 		mqttPublishSuccess++;
 #endif // DEBUG_MQTT
 	}
 
-	// Empty payload for next use.
-	emptyPayload();
-	return;
+	return ret;
 }
 
 /*
- * emptyPayload
- *
- * Clears so we start at beginning.
+ * publishEntry functions
  */
-void
-emptyPayload(void)
+publishEntry *
+findFreePublish(void)
 {
-	_mqttPayload[0] = '\0';
+	static int last = 0;
+	int i = last;
+
+	do {
+		i++;
+		if (i >= MQTT_NUM_PUBLISH_PKTS) {
+			i = 0;
+		}
+		if (mqttPublishArray[i].packetId == 0) {
+			clearPublishEntry(&mqttPublishArray[i]);
+			last = i;
+			return &mqttPublishArray[i];
+		}
+	} while (i != last);
+
+	mqttPublishNoMem++;
+	return NULL;
+}
+
+void
+clearPublishEntry(publishEntry *publish)
+{
+	publish->packetId = 0;
+	publish->topic[0] = '\0';
+	publish->payload[0] = '\0';
 }
 
 void

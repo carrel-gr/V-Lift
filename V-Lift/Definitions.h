@@ -59,7 +59,7 @@ Author:		David Carrel
 // A resistor voltage divider is used to bring the voltage into the ADC range
 // Divider = (top_resistor + bottom_resistor) / bottom_resistor
 // top = 470k, bottom = 47k
-#define BAT_VOLTAGE_DIVIDER 11
+#define BAT_VOLTAGE_DIVIDER 11.0
 // If your ADC is measuring voltage slightly wrong, you can adjust with this.
 #define	BAT_MULTIPLIER 1.04
 
@@ -168,7 +168,7 @@ Author:		David Carrel
 #define BUTTON_LED_ON  HIGH
 #define BUTTON_LED_OFF LOW
 
-#define MAX_MQTT_NAME_LENGTH 81
+#define MAX_MQTT_NAME_LENGTH 32
 #define MAX_FORMATTED_DATA_VALUE_LENGTH 513 // DAVE
 
 // MQTT HA Subscription - Lets us know if HA restarts.
@@ -226,7 +226,6 @@ struct mqttState
 {
 	mqttEntityId entityId;
 	char mqttName[MAX_MQTT_NAME_LENGTH];
-	bool allPods;
 	bool subscribe;
 	bool retain;
 	homeAssistantClass haClass;
