@@ -11,6 +11,8 @@
 // handle top sensor going wet w/o bottom - longer delay after blowing?
 // make 100% battery be higher voltage to encompass more range - maybe send all voltages to MQTT
 
+#define REMOVE_WEB_CONFIG
+
 #include <bit>
 #include <bitset>
 #include <cstdint>
@@ -26,7 +28,9 @@
 #define LED_BUILTIN 2
 #endif // ! MP_XIAO_ESP32C6
 #include <DNSServer.h>
+#ifndef REMOVE_WEB_CONFIG
 #include <WiFiManager.h>
+#endif // ! REMOVE_WEB_CONFIG
 #include <Preferences.h>
 #include <PsychicMqttClient.h>
 #include <ElegantOTA.h>
@@ -413,7 +417,7 @@ configLoop (void)
 #endif // USE_DISPLAY
 #ifdef DEBUG_OVER_SERIAL
 		Serial.println("Configuration is not set. Push button.");
-#endif
+#endif // DEBUG_OVER_SERIAL
 
 		flashBuiltinLed(250);
 		if (myPodNum == 1) {
@@ -429,9 +433,20 @@ configLoop (void)
 		delay(30);
 	}
 
+#ifdef REMOVE_WEB_CONFIG
+#ifdef USE_DISPLAY
+	updateOLED(false, "Config", "not set.", "No web config!");
+#endif // USE_DISPLAY
+#ifdef DEBUG_OVER_SERIAL
+	Serial.println("Configuration is not set and web config is not available.");
+#endif // DEBUG_OVER_SERIAL
+	delay(3000);
+#else // REMOVE_WEB_CONFIG
 	configHandler();
+#endif // REMOVE_WEB_CONFIG
 }
 
+#ifndef REMOVE_WEB_CONFIG
 void
 configHandler(void)
 {
@@ -528,6 +543,7 @@ configHandler(void)
 	delay(1000);
 	ESP.restart();
 }
+#endif // ! REMOVE_WEB_CONFIG
 
 /*
  * loop
@@ -562,12 +578,9 @@ loop ()
 #endif // MP_XIAO_ESP32C6 && DAVE_EXT_ANT
 		preferences.end();
 		if (myPodNum == 1) {
-//			preferences.begin(DEVICE_NAME, false); // RW
-//			preferences.putString(PREF_NAME_SSID, "SFYCMEMBERS");
-//			preferences.putString(PREF_NAME_PASS, "SFYC1869");
-//			preferences.end();
-// DAVE - hack
+#ifndef REMOVE_WEB_CONFIG
 			configHandler();
+#endif // ! REMOVE_WEB_CONFIG
 		}
 		ESP.restart();
 	}
