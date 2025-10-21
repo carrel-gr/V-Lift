@@ -228,6 +228,7 @@ struct mqttState
 	char mqttName[MAX_MQTT_NAME_LENGTH];
 	bool subscribe;
 	bool retain;
+	bool doEntity;
 	homeAssistantClass haClass;
 };
 

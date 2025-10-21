@@ -121,33 +121,33 @@ uint32_t wifiReconnects = 0;
  */
 static struct mqttState _mqttSysEntities[] =
 {
-	// Entity,                                "Name",           Subscribe, Retain, HA Class
+	// Entity,                                "Name",           Subscribe, Retain, doEntity, HA Class
 #ifdef DEBUG_FREEMEM
-	{ mqttEntityId::entityFreemem,            "freemem",            false, false, homeAssistantClass::haClassInfo },
+	{ mqttEntityId::entityFreemem,            "freemem",            false, false,  true,     homeAssistantClass::haClassInfo },
 #endif
 #ifdef DEBUG_WIFI_DAVE_HACK
-	{ mqttEntityId::entityRSSI,               "RSSI",               false, false, homeAssistantClass::haClassInfo },
-	{ mqttEntityId::entityBSSID,              "BSSID",              false, false, homeAssistantClass::haClassInfo },
-	{ mqttEntityId::entityTxPower,            "TX_Power",           false, false, homeAssistantClass::haClassInfo },
-	{ mqttEntityId::entityWifiRecon,          "reconnects",         false, false, homeAssistantClass::haClassInfo },
+	{ mqttEntityId::entityRSSI,               "RSSI",               false, false,  true,     homeAssistantClass::haClassInfo },
+	{ mqttEntityId::entityBSSID,              "BSSID",              false, false,  true,     homeAssistantClass::haClassInfo },
+	{ mqttEntityId::entityTxPower,            "TX_Power",           false, false,  true,     homeAssistantClass::haClassInfo },
+	{ mqttEntityId::entityWifiRecon,          "reconnects",         false, false,  true,     homeAssistantClass::haClassInfo },
 #endif // DEBUG_WIFI
 #ifdef DEBUG_UPTIME
-	{ mqttEntityId::entityUptime,             "Uptime",             false, false, homeAssistantClass::haClassDuration },
+	{ mqttEntityId::entityUptime,             "Uptime",             false, false,  true,     homeAssistantClass::haClassDuration },
 #endif // DEBUG_UPTIME
-	{ mqttEntityId::entitySystemMode,         "System_Mode",        true,  true,  homeAssistantClass::haClassSelect },
+	{ mqttEntityId::entitySystemMode,         "System_Mode",        true,  true,   true,     homeAssistantClass::haClassSelect },
 };
 
 static struct mqttState _mqttPodEntities[] =
 {
-	// Entity,                                "Name",           Subscribe, Retain, HA Class
-	{ mqttEntityId::entityVersion,            "Version",            false, true,  homeAssistantClass::haClassInfo },
-	{ mqttEntityId::entityPodMode,            "Mode",               false, true,  homeAssistantClass::haClassInfo },
-	{ mqttEntityId::entityPodAction,          "Action",             false, true,  homeAssistantClass::haClassInfo },
-	{ mqttEntityId::entityPodPosition,        "Position",           false, true,  homeAssistantClass::haClassInfo },
-	{ mqttEntityId::entityPodBatPct,          "Battery",            false, true,  homeAssistantClass::haClassBattery },
-	{ mqttEntityId::entityPodBatVlt,          "Voltage",            false, true,  homeAssistantClass::haClassVoltage },
-	{ mqttEntityId::entityPodTopSensor,       "Top_Sensor",         false, true,  homeAssistantClass::haClassMoisture },
-	{ mqttEntityId::entityPodBotSensor,       "Bottom_Sensor",      false, true,  homeAssistantClass::haClassMoisture }
+	// Entity,                                "Name",           Subscribe, Retain, doEntity, HA Class
+	{ mqttEntityId::entityVersion,            "Version",            false, true,   false,    homeAssistantClass::haClassInfo },
+	{ mqttEntityId::entityPodMode,            "Mode",               false, true,   false,    homeAssistantClass::haClassInfo },
+	{ mqttEntityId::entityPodAction,          "Action",             false, true,   false,    homeAssistantClass::haClassInfo },
+	{ mqttEntityId::entityPodPosition,        "Position",           false, true,   true,     homeAssistantClass::haClassInfo },
+	{ mqttEntityId::entityPodBatPct,          "Battery",            false, true,   true,     homeAssistantClass::haClassBattery },
+	{ mqttEntityId::entityPodBatVlt,          "Voltage",            false, true,   false,    homeAssistantClass::haClassVoltage },
+	{ mqttEntityId::entityPodTopSensor,       "Top_Sensor",         false, true,   true,     homeAssistantClass::haClassMoisture },
+	{ mqttEntityId::entityPodBotSensor,       "Bottom_Sensor",      false, true,   true,     homeAssistantClass::haClassMoisture }
 };
 
 // These timers are used in the main loop.
@@ -2059,6 +2059,30 @@ addState(publishEntry *publish, mqttState *singleEntity, int podNum)
 	return result;
 }
 
+boolean
+addPodState(publishEntry *publish, int podNum)
+{
+	char response[MAX_FORMATTED_DATA_VALUE_LENGTH];
+	boolean result;
+	int numberOfEntities = sizeof(_mqttPodEntities) / sizeof(struct mqttState);
+
+	result = addToPayload(publish, "{ ");
+	for (int i = 0; (i < numberOfEntities) && result; i++) {
+		char value[16];
+
+		// Read the register(s)/data
+		readEntity(&_mqttPodEntities[i], &value[0], podNum);
+		snprintf(response, sizeof(response), "%s\"%s\": \"%s\"", i == 0 ? "" : ", ", _mqttPodEntities[i].mqttName, value);
+
+		result = addToPayload(publish, response);
+	}
+	if (result) {
+		result = addToPayload(publish, " }");
+	}
+
+	return result;
+}
+
 void
 sendStatus(unsigned long *lastRun)
 {
@@ -2275,12 +2299,16 @@ addConfig(publishEntry *publish, mqttState *singleEntity, int podNum)
 		}
 	}
 
-	switch (singleEntity->entityId) {
-	default:
+	if (podNum == 0) {
 		snprintf(stateAddition, sizeof(stateAddition),
 			 ", \"state_topic\": \"" DEVICE_NAME "/%s/%s/state\"",
 			 myUniqueId, mqttName);
-		break;
+	} else {
+		snprintf(stateAddition, sizeof(stateAddition),
+			 ", \"state_topic\": \"" DEVICE_NAME "/%s/Pod%d/state\""
+			 ", \"value_template\": \"{{ value_json.%s | default(\\\"\\\") }}\""
+			 ", \"json_attributes_topic\": \"" DEVICE_NAME "/%s/Pod%d/state\"",
+			 myUniqueId, podNum, singleEntity->mqttName, myUniqueId, podNum);
 	}
 	if (!addToPayload(publish, stateAddition)) {
 		return false;
@@ -2338,8 +2366,7 @@ sendData(unsigned long *lastRun)
 	static int nextToSend = 0;
 	int curSent = 0;
 	int numSysEntities = sizeof(_mqttSysEntities) / sizeof(struct mqttState);
-	int numPodEntities = sizeof(_mqttPodEntities) / sizeof(struct mqttState);
-	int totalEntities = numSysEntities + (numPodEntities * NUM_PODS);
+	int totalEntities = numSysEntities + NUM_PODS;
 
 	if ((nextToSend >= totalEntities) && checkTimer(lastRun, DATA_INTERVAL)) {
 		nextToSend = 0;  // Only restart if we finished previous run.
@@ -2348,20 +2375,20 @@ sendData(unsigned long *lastRun)
 	for (int i = nextToSend; (i < totalEntities) && (curSent < MQTT_PUBLISH_BURST); i++) {
 		int podNum, entityIdx;
 		struct mqttState *entity;
-		publishEntry *publish = findFreePublish();
-
-		if (publish == NULL) {
-			break;
-		}
+		publishEntry *publish;
 
 		if (i < numSysEntities) {
 			podNum = 0;
 			entityIdx = i;
 			entity = &_mqttSysEntities[entityIdx];
 		} else {
-			podNum = ((i - numSysEntities) / numPodEntities) + 1;
-			entityIdx = (i - numSysEntities) % numPodEntities;
-			entity = &_mqttPodEntities[entityIdx];
+			podNum = (i - numSysEntities) + 1;
+			entity = NULL;
+		}
+
+		publish = findFreePublish();
+		if (publish == NULL) {
+			break;
 		}
 
 		if (!sendDataFromMqttState(publish, entity, false, podNum)) {
@@ -2390,11 +2417,7 @@ sendHaData(unsigned long *lastRun)
 	for (int i = nextToSend; (i < totalEntities) && (curSent < MQTT_PUBLISH_BURST); i++) {
 		int podNum, entityIdx;
 		struct mqttState *entity;
-		publishEntry *publish = findFreePublish();
-
-		if (publish == NULL) {
-			break;
-		}
+		publishEntry *publish;
 
 		if (i < numSysEntities) {
 			podNum = 0;
@@ -2404,6 +2427,15 @@ sendHaData(unsigned long *lastRun)
 			podNum = ((i - numSysEntities) / numPodEntities) + 1;
 			entityIdx = (i - numSysEntities) % numPodEntities;
 			entity = &_mqttPodEntities[entityIdx];
+		}
+
+		if (!entity->doEntity) {
+			continue;
+		}
+
+		publish = findFreePublish();
+		if (publish == NULL) {
+			break;
 		}
 
 		if (!sendDataFromMqttState(publish, entity, true, podNum)) {
@@ -2420,9 +2452,7 @@ bool
 sendDataFromMqttState(publishEntry *publish, mqttState *singleEntity, bool doHomeAssistant, int podNum)
 {
 	boolean result = false;
-
-	if (singleEntity == NULL)
-		return false;
+	boolean retain;
 
 	if (doHomeAssistant) {
 		const char *entityType;
@@ -2447,19 +2477,23 @@ sendDataFromMqttState(publishEntry *publish, mqttState *singleEntity, bool doHom
 		} else {
 			snprintf(publish->topic, sizeof(publish->topic), "homeassistant/%s/%s/Pod%d_%s/config", entityType, myUniqueId, podNum, singleEntity->mqttName);
 		}
+		retain = singleEntity->retain;
 		result = addConfig(publish, singleEntity, podNum);
 	} else {
 		if (podNum == 0) {
 			snprintf(publish->topic, sizeof(publish->topic), DEVICE_NAME "/%s/%s/state", myUniqueId, singleEntity->mqttName);
+			retain = singleEntity->retain;
+			result = addState(publish, singleEntity, podNum);
 		} else {
-			snprintf(publish->topic, sizeof(publish->topic), DEVICE_NAME "/%s/Pod%d_%s/state", myUniqueId, podNum, singleEntity->mqttName);
+			snprintf(publish->topic, sizeof(publish->topic), DEVICE_NAME "/%s/Pod%d/state", myUniqueId, podNum);
+			retain = MQTT_RETAIN;
+			result = addPodState(publish, podNum);
 		}
-		result = addState(publish, singleEntity, podNum);
 	}
 
 	if (result) {
 		// And send
-		result = sendMqtt(publish, singleEntity->retain ? MQTT_RETAIN : false);
+		result = sendMqtt(publish, retain ? MQTT_RETAIN : false);
 	}
 	return result;
 }
