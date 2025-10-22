@@ -1613,7 +1613,7 @@ updateOLED(bool justStatus, const char* line2, const char* line3, const char* li
 void
 printWifiBars(int rssi)
 {
-	if (rssi >= -55) { 
+	if (rssi < 0 && rssi >= -55) { 
 		_display.fillRect((WIFI_X_POS + 0),7,4,1, WHITE);
 		_display.fillRect((WIFI_X_POS + 5),6,4,2, WHITE);
 		_display.fillRect((WIFI_X_POS + 10),4,4,4, WHITE);
