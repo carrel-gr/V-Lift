@@ -282,8 +282,13 @@ void setup()
 	pinMode(TOP_SENSOR_PIN, SENSOR_PIN_MODE);
 	pinMode(BOT_SENSOR_PIN, SENSOR_PIN_MODE);
 
-	pinMode(UP_BUTTON_PIN, BUTTON_MODE);
-	pinMode(DOWN_BUTTON_PIN, BUTTON_MODE);
+	if ((myPodNum == 1) || (myPodNum == 3)) {
+		pinMode(UP_BUTTON_PIN, POD_13_BUTTON_MODE);
+		pinMode(DOWN_BUTTON_PIN, POD_13_BUTTON_MODE);
+	} else {
+		pinMode(UP_BUTTON_PIN, POD_2456_BUTTON_MODE);
+		pinMode(DOWN_BUTTON_PIN, POD_2456_BUTTON_MODE);
+	}
 	pinMode(UP_LED_PIN, OUTPUT);
 	pinMode(DOWN_LED_PIN, OUTPUT);
 
@@ -1234,9 +1239,15 @@ readPodButtons(void)
 #define LONG_PRESS_MILLIS 3000 // 3 seconds
 
 	if (checkTimer(&lastRun, BUTTON_INTERVAL)) {
-		boolean upPressed = (digitalRead(UP_BUTTON_PIN) == BUTTON_PRESSED);
-		boolean downPressed = (digitalRead(DOWN_BUTTON_PIN) == BUTTON_PRESSED);
+		boolean upPressed, downPressed;
 		unsigned long now = millis();
+		if ((myPodNum == 1) || (myPodNum == 3)) {
+			upPressed = (digitalRead(UP_BUTTON_PIN) == POD_13_BUTTON_PRESSED);
+			downPressed = (digitalRead(DOWN_BUTTON_PIN) == POD_13_BUTTON_PRESSED);
+		} else {
+			upPressed = (digitalRead(UP_BUTTON_PIN) == POD_2456_BUTTON_PRESSED);
+			downPressed = (digitalRead(DOWN_BUTTON_PIN) == POD_2456_BUTTON_PRESSED);
+		}
 		if (upPressed && downPressed && ((upPressedMillis == 0) || (downPressedMillis == 0))) {
 			upPressedMillis = now;
 			downPressedMillis = now;

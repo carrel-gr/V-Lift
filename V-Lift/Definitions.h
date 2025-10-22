@@ -163,8 +163,10 @@ Author:		David Carrel
 #define SENSOR_WET      HIGH
 
 // Values to pass for controlling/configuring button LEDs
-#define BUTTON_MODE    INPUT_PULLUP
-#define BUTTON_PRESSED LOW
+#define POD_13_BUTTON_MODE      INPUT_PULLUP	// Hardwired N/O buttons to GND
+#define POD_13_BUTTON_PRESSED   LOW
+#define POD_2456_BUTTON_MODE    INPUT_PULLDOWN	// RF active high buttons
+#define POD_2456_BUTTON_PRESSED HIGH
 #define BUTTON_LED_ON  HIGH
 #define BUTTON_LED_OFF LOW
 
