@@ -187,12 +187,7 @@ enum mqttEntityId {
 	entityWifiRecon,
 #endif // DEBUG_WIFI
 // DAVE - everything after this needs to be per-pod
-#ifdef DEBUG_UPTIME
 	entityUptime,
-#endif // DEBUG_UPTIME
-#if defined(USE_ZIGBEE) && defined(DEBUG_ZIGBEE)
-	entityZigSignalStrength,
-#endif // USE_ZIGBEE && DEBUG_ZIGBEE
 	entityVersion,
 	entitySystemMode,
 	entityPodMode,
@@ -267,6 +262,7 @@ struct podState {
 	float                   batteryVolts;
 	boolean                 topSensorWet;
 	boolean                 botSensorWet;
+	int32_t			uptime;
 	char			version[VERSION_STR_LEN];
 };
 

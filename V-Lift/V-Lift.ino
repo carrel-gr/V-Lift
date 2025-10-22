@@ -131,9 +131,6 @@ static struct mqttState _mqttSysEntities[] =
 	{ mqttEntityId::entityTxPower,            "TX_Power",           false, false,  true,     homeAssistantClass::haClassInfo },
 	{ mqttEntityId::entityWifiRecon,          "reconnects",         false, false,  true,     homeAssistantClass::haClassInfo },
 #endif // DEBUG_WIFI
-#ifdef DEBUG_UPTIME
-	{ mqttEntityId::entityUptime,             "Uptime",             false, false,  true,     homeAssistantClass::haClassDuration },
-#endif // DEBUG_UPTIME
 	{ mqttEntityId::entitySystemMode,         "System_Mode",        true,  true,   true,     homeAssistantClass::haClassSelect },
 };
 
@@ -141,6 +138,7 @@ static struct mqttState _mqttPodEntities[] =
 {
 	// Entity,                                "Name",           Subscribe, Retain, doEntity, HA Class
 	{ mqttEntityId::entityVersion,            "Version",            false, true,   false,    homeAssistantClass::haClassInfo },
+	{ mqttEntityId::entityUptime,             "Uptime",             false, false,  false,    homeAssistantClass::haClassDuration },
 	{ mqttEntityId::entityPodMode,            "Mode",               false, true,   false,    homeAssistantClass::haClassInfo },
 	{ mqttEntityId::entityPodAction,          "Action",             false, true,   false,    homeAssistantClass::haClassInfo },
 	{ mqttEntityId::entityPodPosition,        "Position",           false, true,   true,     homeAssistantClass::haClassInfo },
@@ -929,6 +927,7 @@ getRemotePodStatus (void)
 					}
 				}
 				parseStr(buf, "VV=", pods[podNum].version, sizeof(pods[podNum].version));
+				pods[podNum].uptime = parseInt(buf, "UT=");
 				if (goodUpdate) {
 					pods[podNum].lastUpdate = millis();
 				}
@@ -944,9 +943,9 @@ sendPodInfoToNumberOne (void)
 	IPAddress numOneIP(192, 168, PRIV_WIFI_SUBNET, 1);
 
 	udp.beginPacket(numOneIP, PRIV_UDP_PORT);
-	udp.printf("PN=%d,BP=%d,BM=%d,MO=%d,AC=%d,PO=%d,TS=%c,BS=%c,FB=%d,VV=%s", myPodNum, myPod->batteryPct, (int)(myPod->batteryVolts * 1000.0),
+	udp.printf("PN=%d,BP=%d,BM=%d,MO=%d,AC=%d,PO=%d,TS=%c,BS=%c,FB=%d,VV=%s,UT=%ld", myPodNum, myPod->batteryPct, (int)(myPod->batteryVolts * 1000.0),
 		   myPod->mode, myPod->action, myPod->position, myPod->topSensorWet ? '1' : '0', myPod->botSensorWet ? '1' : '0',
-		   remoteButtons, myPod->version);
+		   remoteButtons, myPod->version, myPod->uptime);
 	if (remoteButtons != buttonState::nothingPressed) {
 #ifdef DEBUG_OVER_SERIAL
 		Serial.printf("Sending Front buttons (%d) to #1.\n", remoteButtons);
@@ -1227,6 +1226,7 @@ readPodState(void)
 	}
 #endif // #ifdef DEBUG_OVER_SERIAL
 	myPod->position = newPosition;
+	myPod->uptime = getUptimeSeconds();
 	myPod->lastUpdate = now;
 }
 
@@ -2019,11 +2019,9 @@ readEntity(mqttState *singleEntity, char *value, int podNum)
 		sprintf(value, "%lu", freeMemory());
 		break;
 #endif // DEBUG_FREEMEM
-#ifdef DEBUG_UPTIME
 	case mqttEntityId::entityUptime:
-		sprintf(value, "%lu", getUptimeSeconds());
+		sprintf(value, "%ld", pods[podNum].uptime);
 		break;
-#endif // DEBUG_UPTIME
 	case mqttEntityId::entityVersion:
 		sprintf(value, "%s", pods[podNum].version);
 		break;
@@ -2287,9 +2285,7 @@ addConfig(publishEntry *publish, mqttState *singleEntity, int podNum)
 		sprintf(stateAddition, ", \"icon\": \"mdi:memory\"");
 		break;
 #endif // DEBUG_FREEMEM
-#ifdef DEBUG_UPTIME
 	case mqttEntityId::entityUptime:
-#endif // DEBUG_UPTIME
 	case mqttEntityId::entityPodBatPct:
 	case mqttEntityId::entityPodTopSensor:
 	case mqttEntityId::entityPodBotSensor:
