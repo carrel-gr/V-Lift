@@ -159,8 +159,8 @@ Author:		David Carrel
 #define RELAY_OFF LOW
 
 // Values to control sensors - NC sensor connected to GND
-#define SENSOR_PIN_MODE INPUT_PULLUP
-#define SENSOR_WET      HIGH
+#define SENSOR_PIN_MODE INPUT
+#define SENSOR_WET      LOW
 
 // Values to pass for controlling/configuring button LEDs
 #define POD_13_BUTTON_MODE      INPUT_PULLUP	// Hardwired N/O buttons to GND

@@ -44,7 +44,7 @@
 void setButtonLEDs(int freq = 0);
 
 // Device parameters
-char _version[VERSION_STR_LEN] = "v2.30";
+char _version[VERSION_STR_LEN] = "v2.40";
 char myUniqueId[17];
 char statusTopic[128];
 
@@ -1157,8 +1157,7 @@ readPodState(void)
 		if (digitalRead(TOP_SENSOR_PIN) == SENSOR_WET) topCount++;
 		if (digitalRead(BOT_SENSOR_PIN) == SENSOR_WET) bottomCount++;
 	}
-// DAVE	if (topCount > (SENSOR_NUM_SAMPLES / 2)) { // If half the readings
-	if (topCount) { // If any readings
+	if (topCount > (SENSOR_NUM_SAMPLES / 2)) { // If half the readings
 		topWet = true;
 	}
 	if (bottomCount > (SENSOR_NUM_SAMPLES / 2)) { // If half the readings
