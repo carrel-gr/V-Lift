@@ -85,6 +85,7 @@ volatile bool resendAllData = false;
 WebServer *otaServer = NULL;
 
 NetworkUDP udp;
+#define UDP_BUF_SIZ 128
 #ifdef DEBUG_UDP
 unsigned int udpPacketsSent = 0;
 unsigned int udpPacketsSentErrors = 0;
@@ -166,7 +167,7 @@ static struct mqttState _mqttPodEntities[] =
 #define HA_DATA_INTERVAL INTERVAL_FIVE_MINUTE
 #define POD2POD_DATA_INTERVAL INTERVAL_FIVE_SECONDS
 
-#define POD_DATA_IS_FRESH(_podNum) ((pods[_podNum].lastUpdate != 0) && (millis() - pods[_podNum].lastUpdate) < (4 * POD2POD_DATA_INTERVAL))
+#define POD_DATA_IS_FRESH(_podNum) ((pods[_podNum].lastUpdate != 0) && (getUptimeSeconds() - pods[_podNum].lastUpdate) < (4 * (POD2POD_DATA_INTERVAL / 1000)))
 
 #ifdef USE_DISPLAY
 // Pins GPIO22 and GPIO21 (SCL/SDA) if ESP32
@@ -310,7 +311,7 @@ void setup()
 	pods[0].mode = modeUp;		// System mode
 	pods[0].action = actionStop;	// System action (not used)
 	pods[0].forceMode = false;
-	pods[0].lastUpdate = millis();
+	pods[0].lastUpdate = getUptimeSeconds();
 	myPod->mode = modeUp;		// Always go to UP state when we boot.
 	myPod->action = actionStop;	// and stop until loop reads position
 	myPod->forceMode = false;
@@ -626,9 +627,8 @@ loop ()
 	if (myPodNum == 1) {
 		readSystemModeFromButtons();  // Set system (pods[0]) mode based on buttons and system action
 	} else {
+		// remoteButtons is not used Set resendAllData so frontButtons is consumed by sendPodMessages().
 		if (frontButtons != buttonState::nothingPressed) {
-			remoteButtons = frontButtons;
-			frontButtons = buttonState::nothingPressed;
 			resendAllData = true;
 		}
 	}
@@ -645,7 +645,6 @@ loop ()
 		lastRunSendHaData = 0;
 		lastRunSendData = 0;
 		lastRunPodData = 0;
-		lastRunDisplay = 0;
 		resendAllData = false;
 	}
 
@@ -752,7 +751,6 @@ parseBool (char *data, const char *key)
 	return ret;
 }
 
-#define UDP_BUF_SIZ 128
 void
 getSystemModeFromNumberOne (char *buf)
 {
@@ -762,15 +760,13 @@ getSystemModeFromNumberOne (char *buf)
 	case liftModes::modeUp:
 	case liftModes::modeDown:
 	case liftModes::modeOff:
-		if (fm != -1) {
-			if (mode != pods[0].mode) {
-				resendAllData = true;
-			}
-			pods[0].mode = mode;
-//			pods[0].action = (liftActions)parseInt(buf, "AC=");
-			pods[0].forceMode = fm == 1 ? true : false;
-			pods[0].lastUpdate = millis();
+		if (mode != pods[0].mode) {
+			resendAllData = true;
 		}
+		pods[0].mode = mode;
+//		pods[0].action = (liftActions)parseInt(buf, "AC=");
+		pods[0].forceMode = fm == 1 ? true : false;
+		pods[0].lastUpdate = getUptimeSeconds();
 	}
 }
 
@@ -859,8 +855,10 @@ getRemotePodStatus (int podNum, char *buf)
 		if (mode == -1) {
 			goodUpdate = false;
 		} else {
-			if (mode != pods[podNum].mode) resendAllData = true;
-			pods[podNum].mode = mode;
+			if (mode != pods[podNum].mode) {
+				if (myPodNum == 1) resendAllData = true;
+				pods[podNum].mode = mode;
+			}
 		}
 	}
 	pods[podNum].forceMode = parseBool(buf, "FM=") == 1;
@@ -869,8 +867,10 @@ getRemotePodStatus (int podNum, char *buf)
 		if (action == -1) {
 			goodUpdate = false;
 		} else {
-			if (action != pods[podNum].action) resendAllData = true;
-			pods[podNum].action = action;
+			if (action != pods[podNum].action) {
+				if (myPodNum == 1) resendAllData = true;
+				pods[podNum].action = action;
+			}
 		}
 	}
 	{
@@ -878,8 +878,10 @@ getRemotePodStatus (int podNum, char *buf)
 		if (position == -1) {
 			goodUpdate = false;
 		} else {
-			if (position != pods[podNum].position) resendAllData = true;
-			pods[podNum].position = position;
+			if (position != pods[podNum].position) {
+				if (myPodNum == 1) resendAllData = true;
+				pods[podNum].position = position;
+			}
 		}
 	}
 	{
@@ -888,8 +890,10 @@ getRemotePodStatus (int podNum, char *buf)
 			goodUpdate = false;
 		} else {
 			bool ts = (val == 1);
-			if (ts != pods[podNum].topSensorWet) resendAllData = true;
-			pods[podNum].topSensorWet = ts;
+			if (ts != pods[podNum].topSensorWet) {
+				if (myPodNum == 1) resendAllData = true;
+				pods[podNum].topSensorWet = ts;
+			}
 		}
 	}
 	{
@@ -898,11 +902,13 @@ getRemotePodStatus (int podNum, char *buf)
 			goodUpdate = false;
 		} else {
 			bool bs = (val == 1);
-			if (bs != pods[podNum].botSensorWet) resendAllData = true;
-			pods[podNum].botSensorWet = bs;
+			if (bs != pods[podNum].botSensorWet) {
+				if (myPodNum == 1) resendAllData = true;
+				pods[podNum].botSensorWet = bs;
+			}
 		}
 	}
-	{
+	if (myPodNum == 1) {
 		buttonState tmpButtons = (buttonState)parseInt(buf, "FB=");
 		switch (tmpButtons) {
 		case buttonState::upPressed:
@@ -923,7 +929,7 @@ getRemotePodStatus (int podNum, char *buf)
 	parseStr(buf, "VV=", pods[podNum].version, sizeof(pods[podNum].version));
 	pods[podNum].uptime = parseInt(buf, "UT=");
 	if (goodUpdate) {
-		pods[podNum].lastUpdate = millis();
+		pods[podNum].lastUpdate = getUptimeSeconds();
 	}
 }
 
@@ -935,12 +941,12 @@ sendPodInfo (void)
 	udp.beginPacket(numOneIP, PRIV_UDP_PORT);
 	udp.printf("PN=%d,BP=%d,BM=%d,MO=%d,FM=%c,AC=%d,PO=%d,TS=%c,BS=%c,FB=%d,VV=%s,UT=%ld", myPodNum, myPod->batteryPct, (int)(myPod->batteryVolts * 1000.0),
 		   myPod->mode, myPod->forceMode ? '1' : '0', myPod->action, myPod->position, myPod->topSensorWet ? '1' : '0', myPod->botSensorWet ? '1' : '0',
-		   remoteButtons, myPod->version, myPod->uptime);
-	if (remoteButtons != buttonState::nothingPressed) {
+		   frontButtons, myPod->version, myPod->uptime);
+	if ((frontButtons != buttonState::nothingPressed) && (myPodNum != 1)) {
 #ifdef DEBUG_OVER_SERIAL
-		Serial.printf("Sending Front buttons (%d) to #1.\n", remoteButtons);
+		Serial.printf("Sending Front buttons (%d) to #1.\n", frontButtons);
 #endif // DEBUG_OVER_SERIAL
-		remoteButtons = buttonState::nothingPressed;
+		frontButtons = buttonState::nothingPressed;
 	}
 #ifndef DEBUG_UDP
 	udp.endPacket();
@@ -1090,7 +1096,7 @@ readSystemModeFromButtons(void)
 	case buttonState::upPressed:
 		pods[0].mode = modeUp;
 		pods[0].forceMode = false;
-		pods[0].lastUpdate = millis();
+		pods[0].lastUpdate = getUptimeSeconds();
 		resendAllData = true;
 #ifdef DEBUG_OVER_SERIAL
 		Serial.println("Up button press consumed.");
@@ -1099,7 +1105,7 @@ readSystemModeFromButtons(void)
 	case buttonState::downPressed:
 		pods[0].mode = modeDown;
 		pods[0].forceMode = false;
-		pods[0].lastUpdate = millis();
+		pods[0].lastUpdate = getUptimeSeconds();
 		resendAllData = true;
 #ifdef DEBUG_OVER_SERIAL
 		Serial.println("Down button press consumed.");
@@ -1108,7 +1114,7 @@ readSystemModeFromButtons(void)
 	case buttonState::upLongPressed:
 		pods[0].mode = modeUp;
 		pods[0].forceMode = true;
-		pods[0].lastUpdate = millis();
+		pods[0].lastUpdate = getUptimeSeconds();
 		resendAllData = true;
 #ifdef DEBUG_OVER_SERIAL
 		Serial.println("Up button LONG press consumed.");
@@ -1117,7 +1123,7 @@ readSystemModeFromButtons(void)
 	case buttonState::downLongPressed:
 		pods[0].mode = modeDown;
 		pods[0].forceMode = true;
-		pods[0].lastUpdate = millis();
+		pods[0].lastUpdate = getUptimeSeconds();
 		resendAllData = true;
 #ifdef DEBUG_OVER_SERIAL
 		Serial.println("Down button LONG press consumed.");
@@ -1126,7 +1132,7 @@ readSystemModeFromButtons(void)
 	case buttonState:: bothPressed:
 		pods[0].mode = modeOff;
 		pods[0].forceMode = false;
-		pods[0].lastUpdate = millis();
+		pods[0].lastUpdate = getUptimeSeconds();
 		resendAllData = true;
 #ifdef DEBUG_OVER_SERIAL
 		Serial.println("Both buttons press consumed.");
@@ -1217,7 +1223,7 @@ readPodState(void)
 #endif // #ifdef DEBUG_OVER_SERIAL
 	myPod->position = newPosition;
 	myPod->uptime = getUptimeSeconds();
-	myPod->lastUpdate = now;
+	myPod->lastUpdate = getUptimeSeconds();
 }
 
 void
@@ -2599,15 +2605,15 @@ mqttCallback(char *topic, char *message, int retain, int qos, bool dup)
 				if (!strncmp(singleString, "Up", 3)) {
 					pods[0].mode = liftModes::modeUp;
 					pods[0].forceMode = false;
-					pods[0].lastUpdate = millis();
+					pods[0].lastUpdate = getUptimeSeconds();
 				} else if (!strncmp(singleString, "Down", 5)) {
 					pods[0].mode = liftModes::modeDown;
 					pods[0].forceMode = false;
-					pods[0].lastUpdate = millis();
+					pods[0].lastUpdate = getUptimeSeconds();
 				} else if (!strncmp(singleString, "Off", 4)) {
 					pods[0].mode = liftModes::modeOff;
 					pods[0].forceMode = false;
-					pods[0].lastUpdate = millis();
+					pods[0].lastUpdate = getUptimeSeconds();
 #ifdef DEBUG_MQTT
 				} else {
 					mqttBadCallbacks++;
