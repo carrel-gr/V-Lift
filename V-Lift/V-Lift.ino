@@ -89,6 +89,7 @@ NetworkUDP udp;
 unsigned int udpPacketsSent = 0;
 unsigned int udpPacketsSentErrors = 0;
 unsigned int udpPacketsReceived = 0;
+unsigned int udpPacketsReceivedErrors = 0;
 #endif // DEBUG_UDP
 
 volatile boolean configButtonPressed = false;
@@ -312,6 +313,7 @@ void setup()
 	pods[0].lastUpdate = millis();
 	myPod->mode = modeUp;		// Always go to UP state when we boot.
 	myPod->action = actionStop;	// and stop until loop reads position
+	myPod->forceMode = false;
 
 #ifdef USE_DISPLAY
 	updateOLED(false, myUniqueId, "setup complete", _version);
@@ -620,11 +622,10 @@ loop ()
 	readPodState();        // reads/sets sensors, and sets myPod->position
 
 	// MQTT/P2P might have asynchronously updated pods[0].mode or buttons
+	getPodMessages();
 	if (myPodNum == 1) {
-		getRemotePodStatus();
 		readSystemModeFromButtons();  // Set system (pods[0]) mode based on buttons and system action
 	} else {
-		getSystemModeFromNumberOne();
 		if (frontButtons != buttonState::nothingPressed) {
 			remoteButtons = frontButtons;
 			frontButtons = buttonState::nothingPressed;
@@ -632,6 +633,7 @@ loop ()
 		}
 	}
 	myPod->mode = pods[0].mode;
+	myPod->forceMode = pods[0].forceMode;
 	// On remote pods, try waiting for state from #1 before activating the bootup default
 	if ((myPodNum == 1) || pods[0].lastUpdate || (getUptimeSeconds() > 120)) {
 		setPodAction();		// Set myPod->action
@@ -652,6 +654,7 @@ loop ()
 	if (myPodNum == 1) {
 		if (checkTimer(&lastRunPodData, POD2POD_DATA_INTERVAL)) {
 			sendCommandsToRemotePods();
+			sendPodInfo();
 		}
 
 		// Send status/keepalive
@@ -662,7 +665,7 @@ loop ()
 		}
 	} else {
 		if (wifiIsOn && checkTimer(&lastRunPodData, POD2POD_DATA_INTERVAL)) {
-			sendPodInfoToNumberOne();
+			sendPodInfo();
 		}
 	}
 
@@ -751,84 +754,53 @@ parseBool (char *data, const char *key)
 
 #define UDP_BUF_SIZ 128
 void
-getSystemModeFromNumberOne (void)
+getSystemModeFromNumberOne (char *buf)
 {
-	char buf[UDP_BUF_SIZ];
-	int packetSize = udp.parsePacket();
-
-	while (packetSize > 0) {
-#if defined(DEBUG_UDP) && defined(DEBUG_OVER_SERIAL)
-		Serial.print("Received packet of size ");
-		Serial.println(packetSize);
-		Serial.print("From ");
-		IPAddress remoteIp = udp.remoteIP();
-		Serial.print(remoteIp);
-		Serial.print(", port ");
-		Serial.println(udp.remotePort());
-#endif // DEBUG_UDP && DEBUG_OVER_SERIAL
-
-		// read the packet into buffer
-		int podNum, len = udp.read(buf, sizeof(buf));
-		if (len > 0) {
-			buf[len] = 0;
-#if defined(DEBUG_UDP) && defined(DEBUG_OVER_SERIAL)
-			Serial.printf("Data is: %s\n", buf);
-#endif // DEBUG_UDP && DEBUG_OVER_SERIAL
-#ifdef DEBUG_UDP
-			udpPacketsReceived++;
-#endif // DEBUG_UDP
-			podNum = parseInt(buf, "PN=");
-			if (podNum == 0) {
-				liftModes mode = (liftModes)parseInt(buf, "MO=");
-				int fm = parseBool(buf, "FM=");
-				switch (mode) {
-				case liftModes::modeUp:
-				case liftModes::modeDown:
-				case liftModes::modeOff:
-					if (fm != -1) {
-						if (mode != pods[podNum].mode) {
-							resendAllData = true;
-						}
-						pods[podNum].mode = mode;
-//						pods[podNum].action = (liftActions)parseInt(buf, "AC=");
-						pods[podNum].forceMode = fm == 1 ? true : false;
-						pods[podNum].lastUpdate = millis();
-					}
-				}
+	liftModes mode = (liftModes)parseInt(buf, "MO=");
+	int fm = parseBool(buf, "FM=");
+	switch (mode) {
+	case liftModes::modeUp:
+	case liftModes::modeDown:
+	case liftModes::modeOff:
+		if (fm != -1) {
+			if (mode != pods[0].mode) {
+				resendAllData = true;
 			}
+			pods[0].mode = mode;
+//			pods[0].action = (liftActions)parseInt(buf, "AC=");
+			pods[0].forceMode = fm == 1 ? true : false;
+			pods[0].lastUpdate = millis();
 		}
-		packetSize = udp.parsePacket(); // Try to get another.
 	}
 }
 
 void
 sendCommandsToRemotePods (void)
 {
-	for (int podNum = 2; podNum <= NUM_PODS; podNum++) {
-		IPAddress podIP(192, 168, PRIV_WIFI_SUBNET, podNum);
+	IPAddress podIP(192, 168, PRIV_WIFI_SUBNET, 255);
 
-		udp.beginPacket(podIP, PRIV_UDP_PORT);
-		udp.printf("PN=0,MO=%d,FM=%c", pods[0].mode, pods[0].forceMode ? '1' : '0');
+	udp.beginPacket(podIP, PRIV_UDP_PORT);
+	udp.printf("PN=0,MO=%d,FM=%c", pods[0].mode, pods[0].forceMode ? '1' : '0');
 #ifndef DEBUG_UDP
-		udp.endPacket();
+	udp.endPacket();
 #else // ! DEBUG_UDP
-		int err = udp.endPacket();
-		if (err == 0) {
-			udpPacketsSentErrors++;
-		} else {
-			udpPacketsSent++;
-		}
-#endif // ! DEBUG_UDP
+	int err = udp.endPacket();
+	if (err == 0) {
+		udpPacketsSentErrors++;
+	} else {
+		udpPacketsSent++;
 	}
+#endif // ! DEBUG_UDP
 }
 
 void
-getRemotePodStatus (void)
+getPodMessages (void)
 {
 	char buf[UDP_BUF_SIZ];
 	int packetSize = udp.parsePacket();
+	int loops = 0;
 
-	while (packetSize) {
+	while ((packetSize > 0) && (loops < (NUM_PODS + 1))) {
 #if defined(DEBUG_UDP) && defined(DEBUG_OVER_SERIAL)
 		Serial.print("Received packet of size ");
 		Serial.println(packetSize);
@@ -850,101 +822,119 @@ getRemotePodStatus (void)
 			udpPacketsReceived++;
 #endif // DEBUG_UDP
 			podNum = parseInt(buf, "PN=");
-			if (podNum > 1 && podNum <= NUM_PODS) {
-				bool goodUpdate = true;
-				pods[podNum].batteryPct = parseInt(buf, "BP=");
-				{
-					int batteryMilliVolts = parseInt(buf, "BM=");
-					if (batteryMilliVolts == -1) {
-						pods[podNum].batteryVolts = (float)-1;
-					} else {
-						pods[podNum].batteryVolts = (float)batteryMilliVolts / 1000.0;
-					}
-				}
-				{
-					liftModes mode = (liftModes)parseInt(buf, "MO=");
-					if (mode == -1) {
-						goodUpdate = false;
-					} else {
-						if (mode != pods[podNum].mode) resendAllData = true;
-						pods[podNum].mode = mode;
-					}
-				}
-				{
-					liftActions action = (liftActions)parseInt(buf, "AC=");
-					if (action == -1) {
-						goodUpdate = false;
-					} else {
-						if (action != pods[podNum].action) resendAllData = true;
-						pods[podNum].action = action;
-					}
-				}
-				{
-					liftPositions position = (liftPositions)parseInt(buf, "PO=");
-					if (position == -1) {
-						goodUpdate = false;
-					} else {
-						if (position != pods[podNum].position) resendAllData = true;
-						pods[podNum].position = position;
-					}
-				}
-				{
-					int val = parseBool(buf, "TS=");
-					if (val == -1) {
-						goodUpdate = false;
-					} else {
-						bool ts = (val == 1);
-						if (ts != pods[podNum].topSensorWet) resendAllData = true;
-						pods[podNum].topSensorWet = ts;
-					}
-				}
-				{
-					int val = parseBool(buf, "BS=");
-					if (val == -1) {
-						goodUpdate = false;
-					} else {
-						bool bs = (val == 1);
-						if (bs != pods[podNum].botSensorWet) resendAllData = true;
-						pods[podNum].botSensorWet = bs;
-					}
-				}
-				{
-					buttonState tmpButtons = (buttonState)parseInt(buf, "FB=");
-					switch (tmpButtons) {
-					case buttonState::upPressed:
-					case buttonState::upLongPressed:
-					case buttonState::downPressed:
-					case buttonState::downLongPressed:
-					case buttonState::bothPressed:
-						remoteButtons = tmpButtons;
-#ifdef DEBUG_OVER_SERIAL
-						Serial.printf("Remote buttons set to %d\n", remoteButtons);
-#endif // DEBUG_OVER_SERIAL
-						break;
-					case buttonState::nothingPressed:
-					default:
-						break;
-					}
-				}
-				parseStr(buf, "VV=", pods[podNum].version, sizeof(pods[podNum].version));
-				pods[podNum].uptime = parseInt(buf, "UT=");
-				if (goodUpdate) {
-					pods[podNum].lastUpdate = millis();
-				}
+			if (podNum == 0) {
+				getSystemModeFromNumberOne(&buf[0]);
+			} else if (podNum >= 1 && podNum <= NUM_PODS) {
+				getRemotePodStatus(podNum, &buf[0]);
+			} else {
+#ifdef DEBUG_UDP
+				udpPacketsReceivedErrors++;
+#endif // DEBUG_UDP
 			}
+		} else {
+#ifdef DEBUG_UDP
+			udpPacketsReceivedErrors++;
+#endif // DEBUG_UDP
 		}
 		packetSize = udp.parsePacket(); // Try to get another.
+		loops++;
 	}
 }
 
 void
-sendPodInfoToNumberOne (void)
+getRemotePodStatus (int podNum, char *buf)
 {
-	IPAddress numOneIP(192, 168, PRIV_WIFI_SUBNET, 1);
+	bool goodUpdate = true;
+	pods[podNum].batteryPct = parseInt(buf, "BP=");
+	{
+		int batteryMilliVolts = parseInt(buf, "BM=");
+		if (batteryMilliVolts == -1) {
+			pods[podNum].batteryVolts = (float)-1;
+		} else {
+			pods[podNum].batteryVolts = (float)batteryMilliVolts / 1000.0;
+		}
+	}
+	{
+		liftModes mode = (liftModes)parseInt(buf, "MO=");
+		if (mode == -1) {
+			goodUpdate = false;
+		} else {
+			if (mode != pods[podNum].mode) resendAllData = true;
+			pods[podNum].mode = mode;
+		}
+	}
+	pods[podNum].forceMode = parseBool(buf, "FM=") == 1;
+	{
+		liftActions action = (liftActions)parseInt(buf, "AC=");
+		if (action == -1) {
+			goodUpdate = false;
+		} else {
+			if (action != pods[podNum].action) resendAllData = true;
+			pods[podNum].action = action;
+		}
+	}
+	{
+		liftPositions position = (liftPositions)parseInt(buf, "PO=");
+		if (position == -1) {
+			goodUpdate = false;
+		} else {
+			if (position != pods[podNum].position) resendAllData = true;
+			pods[podNum].position = position;
+		}
+	}
+	{
+		int val = parseBool(buf, "TS=");
+		if (val == -1) {
+			goodUpdate = false;
+		} else {
+			bool ts = (val == 1);
+			if (ts != pods[podNum].topSensorWet) resendAllData = true;
+			pods[podNum].topSensorWet = ts;
+		}
+	}
+	{
+		int val = parseBool(buf, "BS=");
+		if (val == -1) {
+			goodUpdate = false;
+		} else {
+			bool bs = (val == 1);
+			if (bs != pods[podNum].botSensorWet) resendAllData = true;
+			pods[podNum].botSensorWet = bs;
+		}
+	}
+	{
+		buttonState tmpButtons = (buttonState)parseInt(buf, "FB=");
+		switch (tmpButtons) {
+		case buttonState::upPressed:
+		case buttonState::upLongPressed:
+		case buttonState::downPressed:
+		case buttonState::downLongPressed:
+		case buttonState::bothPressed:
+			remoteButtons = tmpButtons;
+#ifdef DEBUG_OVER_SERIAL
+			Serial.printf("Remote buttons set to %d\n", remoteButtons);
+#endif // DEBUG_OVER_SERIAL
+			break;
+		case buttonState::nothingPressed:
+		default:
+			break;
+		}
+	}
+	parseStr(buf, "VV=", pods[podNum].version, sizeof(pods[podNum].version));
+	pods[podNum].uptime = parseInt(buf, "UT=");
+	if (goodUpdate) {
+		pods[podNum].lastUpdate = millis();
+	}
+}
+
+void
+sendPodInfo (void)
+{
+	IPAddress numOneIP(192, 168, PRIV_WIFI_SUBNET, 255);
 
 	udp.beginPacket(numOneIP, PRIV_UDP_PORT);
-	udp.printf("PN=%d,BP=%d,BM=%d,MO=%d,AC=%d,PO=%d,TS=%c,BS=%c,FB=%d,VV=%s,UT=%ld", myPodNum, myPod->batteryPct, (int)(myPod->batteryVolts * 1000.0),
-		   myPod->mode, myPod->action, myPod->position, myPod->topSensorWet ? '1' : '0', myPod->botSensorWet ? '1' : '0',
+	udp.printf("PN=%d,BP=%d,BM=%d,MO=%d,FM=%c,AC=%d,PO=%d,TS=%c,BS=%c,FB=%d,VV=%s,UT=%ld", myPodNum, myPod->batteryPct, (int)(myPod->batteryVolts * 1000.0),
+		   myPod->mode, myPod->forceMode ? '1' : '0', myPod->action, myPod->position, myPod->topSensorWet ? '1' : '0', myPod->botSensorWet ? '1' : '0',
 		   remoteButtons, myPod->version, myPod->uptime);
 	if (remoteButtons != buttonState::nothingPressed) {
 #ifdef DEBUG_OVER_SERIAL
@@ -987,7 +977,7 @@ setButtonLEDs (int freq)
 		}
 	} else if (myPod->action == actionRaise) {
 		// if action raise, then turn on UP
-		if (pods[0].forceMode) {
+		if (myPod->forceMode) {
 			if (checkTimer(&lastLed, 500)) {
 				digitalWrite(UP_LED_PIN, toggle ? BUTTON_LED_ON : BUTTON_LED_OFF);
 				toggle = !toggle;
@@ -999,7 +989,7 @@ setButtonLEDs (int freq)
 	} else if (myPod->action == actionLower) {
 		// if action lower, then turn on DOWN
 		digitalWrite(UP_LED_PIN, BUTTON_LED_OFF);
-		if (pods[0].forceMode) {
+		if (myPod->forceMode) {
 			if (checkTimer(&lastLed, 500)) {
 				digitalWrite(DOWN_LED_PIN, toggle ? BUTTON_LED_ON : BUTTON_LED_OFF);
 				toggle = !toggle;
@@ -1020,7 +1010,7 @@ setPodAction (void)
 	liftActions action = actionStop;
 
 	// Set pod relay actions
-	if (pods[0].forceMode) {
+	if (myPod->forceMode) {
 		switch (pods[0].mode) {
 		case modeUp:
 			action = actionRaise;
@@ -1685,17 +1675,15 @@ updateDisplayInfo()
 			mode = "XXXX";
 			break;
 		}
-		if (myPodNum == 1) {
-			activeSys = 1;  // Pod 1 always knows system state.
-			for (int podNum = 1; podNum <= NUM_PODS; podNum++) {
-				if (POD_DATA_IS_FRESH(podNum)) {
-					activePeers++;
-				}
+		activeSys = POD_DATA_IS_FRESH(0) ? 1 : 0;
+		for (int podNum = 1; podNum <= NUM_PODS; podNum++) {
+			if (POD_DATA_IS_FRESH(podNum)) {
+				activePeers++;
 			}
+		}
+		if (myPodNum == 1) {
 			activeWiFi = WiFi.softAPgetStationNum();
 		} else {
-			activeSys = POD_DATA_IS_FRESH(0) ? 1 : 0;
-			activePeers = POD_DATA_IS_FRESH(myPodNum) ? 1 : 0;
 			activeWiFi = WiFi.status() == WL_CONNECTED ? 1 : 0;
 		}
 		snprintf(line2, sizeof(line2), "%s : %hhd/%hhd/%hhd : %s", mode, activeSys, activePeers, activeWiFi,
@@ -1794,7 +1782,7 @@ updateDisplayInfo()
 #endif // DEBUG_UPTIME
 #ifdef DEBUG_UDP
 	} else if (dbgIdx < 20) {
-		snprintf(line4, sizeof(line4), "UDP: S=%u/%u  R=%u", udpPacketsSent, udpPacketsSentErrors, udpPacketsReceived);
+		snprintf(line4, sizeof(line4), "UDP: S=%u/%u  R=%u/%u", udpPacketsSent, udpPacketsSentErrors, udpPacketsReceived, udpPacketsReceivedErrors);
 		dbgIdx = 20;
 #endif // DEBUG_UDP
 	} else if (dbgIdx < 21) {
