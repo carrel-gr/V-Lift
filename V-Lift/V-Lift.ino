@@ -44,7 +44,7 @@
 void setButtonLEDs(int freq = 0);
 
 // Device parameters
-char _version[VERSION_STR_LEN] = "v2.40";
+char _version[VERSION_STR_LEN] = "v2.50";
 char myUniqueId[17];
 char statusTopic[128];
 
@@ -166,6 +166,7 @@ static struct mqttState _mqttPodEntities[] =
 #define DATA_INTERVAL INTERVAL_ONE_MINUTE
 #define HA_DATA_INTERVAL INTERVAL_FIVE_MINUTE
 #define POD2POD_DATA_INTERVAL INTERVAL_FIVE_SECONDS
+#define RELAY_MAX_FREQ INTERVAL_FIVE_SECONDS
 
 #define POD_DATA_IS_FRESH(_podNum) ((pods[_podNum].lastUpdate != 0) && (getUptimeSeconds() - pods[_podNum].lastUpdate) < (4 * (POD2POD_DATA_INTERVAL / 1000)))
 
@@ -1014,6 +1015,7 @@ void
 setPodAction (void)
 {
 	liftActions action = actionStop;
+	static unsigned long lastAction = 0;
 
 	// Set pod relay actions
 	if (myPod->forceMode) {
@@ -1046,16 +1048,14 @@ setPodAction (void)
 			}
 		}
 	}
+	if (action != myPod->action) {
+		if (checkTimer(&lastAction, RELAY_MAX_FREQ)) {
 #ifdef DEBUG_OVER_SERIAL
-	{
-		static liftActions lastAction = actionStop;
-		if (action != lastAction) {
-			Serial.printf("Changing action from %d to %d.\n", lastAction, action);
-			lastAction = action;
+			Serial.printf("Changing action from %d to %d.\n", myPod->action, action);
+#endif // DEBUG_OVER_SERIAL
+			myPod->action = action;
 		}
 	}
-#endif // DEBUG_OVER_SERIAL
-	myPod->action = action;
 }
 
 void
