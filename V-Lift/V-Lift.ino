@@ -44,7 +44,7 @@
 void setButtonLEDs(int freq = 0);
 
 // Device parameters
-char _version[VERSION_STR_LEN] = "v2.50";
+char _version[VERSION_STR_LEN] = "v2.56";
 char myUniqueId[17];
 char statusTopic[128];
 
@@ -79,7 +79,9 @@ uint32_t mqttPublishSuccess = 0;
 uint32_t mqttPublishFail = 0;
 uint32_t mqttPublishNoMem = 0;
 #endif // DEBUG_MQTT
-volatile bool resendAllData = false;
+volatile bool mqttStartupMode = true;
+volatile bool mqttCallbackRcvd = false;
+volatile bool wifiRestarted = false;
 
 // OTA setup
 WebServer *otaServer = NULL;
@@ -151,7 +153,6 @@ static struct mqttState _mqttPodEntities[] =
 };
 
 // These timers are used in the main loop.
-#define RUNSTATE_INTERVAL 2000
 #define INTERVAL_ONE_SECOND 1000
 #define INTERVAL_FIVE_SECONDS 5000
 #define INTERVAL_TEN_SECONDS 10000
@@ -160,15 +161,20 @@ static struct mqttState _mqttPodEntities[] =
 #define INTERVAL_FIVE_MINUTE 300000
 #define INTERVAL_ONE_HOUR 3600000
 #define INTERVAL_ONE_DAY 86400000
-#define UPDATE_STATUS_BAR_INTERVAL 500
-#define WIFI_RECONNECT_INTERVAL INTERVAL_ONE_MINUTE  // DAVE - change to 5 ??
+#define RUNSTATE_INTERVAL (INTERVAL_ONE_SECOND * 2)
+#define UPDATE_STATUS_BAR_INTERVAL (INTERVAL_ONE_SECOND / 2)
+//#define WIFI_RECONNECT_INTERVAL (INTERVAL_ONE_MINUTE * 2)  // DAVE - change to 5 ?? - Look at WIFI_TRIES_BEFORE_RESET
+#define WIFI_RECONNECT_INTERVAL INTERVAL_THIRTY_SECONDS
 #define STATUS_INTERVAL INTERVAL_TEN_SECONDS
-#define DATA_INTERVAL INTERVAL_ONE_MINUTE
-#define HA_DATA_INTERVAL INTERVAL_FIVE_MINUTE
-#define POD2POD_DATA_INTERVAL INTERVAL_FIVE_SECONDS
+#define DATA_INTERVAL_URGENT INTERVAL_FIVE_SECONDS
+#define DATA_INTERVAL_NORMAL (INTERVAL_ONE_MINUTE * 2)
+#define HA_DATA_INTERVAL_INITIAL (INTERVAL_TEN_SECONDS * 2)
+#define HA_DATA_INTERVAL_NORMAL INTERVAL_FIVE_MINUTE
+#define POD2POD_DATA_INTERVAL_URGENT INTERVAL_ONE_SECOND
+#define POD2POD_DATA_INTERVAL_NORMAL INTERVAL_FIVE_SECONDS
 #define RELAY_MAX_FREQ INTERVAL_FIVE_SECONDS
 
-#define POD_DATA_IS_FRESH(_podNum) ((pods[_podNum].lastUpdate != 0) && (getUptimeSeconds() - pods[_podNum].lastUpdate) < (4 * (POD2POD_DATA_INTERVAL / 1000)))
+#define POD_DATA_IS_FRESH(_podNum) ((pods[_podNum].lastUpdate != 0) && (getUptimeSeconds() - pods[_podNum].lastUpdate) < (4 * (POD2POD_DATA_INTERVAL_NORMAL / 1000)))
 
 #ifdef USE_DISPLAY
 // Pins GPIO22 and GPIO21 (SCL/SDA) if ESP32
@@ -567,6 +573,9 @@ loop ()
 	static unsigned long lastRunSendHaData = 0;
 	static unsigned long lastRunSendData = 0;
 	static unsigned long lastRunPodData = 0;
+	static unsigned long pod2podDataInterval = POD2POD_DATA_INTERVAL_NORMAL;
+	static bool mqttUrgent = false;
+	bool pod2podUrgent = false;
 	boolean wifiIsOn = false;
 	boolean mqttIsOn = false;
 
@@ -621,19 +630,34 @@ loop ()
 	// Update the pod state
 	readPodButtons();
 	readBattery();
-	readPodState();        // reads/sets sensors, and sets myPod->position
+	if (readPodState()) {        // reads/sets sensors, and sets myPod->position
+		mqttUrgent = true;
+		pod2podUrgent = true;
+	}
 
 	// MQTT/P2P might have asynchronously updated pods[0].mode or buttons
-	getPodMessages();
+	if (getPodMessages()) {
+		mqttUrgent = true;
+	}
 	if (myPodNum == 1) {
-		readSystemModeFromButtons();  // Set system (pods[0]) mode based on buttons and system action
+		if (setSystemModeFromButtons()) {
+			// Set system (pods[0]) mode based on buttons and system action
+			pod2podUrgent = true;
+		}
+		frontButtons = buttonState::nothingPressed;
+		remoteButtons = buttonState::nothingPressed;
 	} else {
-		// remoteButtons is not used Set resendAllData so frontButtons is consumed by sendPodMessages().
 		if (frontButtons != buttonState::nothingPressed) {
-			resendAllData = true;
+			remoteButtons = frontButtons; // Save state in remoteButtons to be consumed by sendPodInfo()
+			frontButtons = buttonState::nothingPressed;
+			pod2podUrgent = true;
 		}
 	}
-	myPod->mode = pods[0].mode;
+	if (myPod->mode != pods[0].mode) {
+		myPod->mode = pods[0].mode;
+		mqttUrgent = true;
+		pod2podUrgent = true;
+	}
 	myPod->forceMode = pods[0].forceMode;
 	// On remote pods, try waiting for state from #1 before activating the bootup default
 	if ((myPodNum == 1) || pods[0].lastUpdate || (getUptimeSeconds() > 120)) {
@@ -641,31 +665,41 @@ loop ()
 		engagePodAction();	// activate relays
 	}
 
-	if (resendAllData) {
-		// Read and transmit all entity & HA data to MQTT
-		lastRunSendHaData = 0;
-		lastRunSendData = 0;
-		lastRunPodData = 0;
-		resendAllData = false;
+	if (mqttCallbackRcvd) {
+		mqttUrgent = true;
+		mqttCallbackRcvd = false;
+	}
+	if (wifiRestarted) {
+		pod2podUrgent = true;
+		wifiRestarted = false;
+	}
+	if (pod2podUrgent) {
+		// Read and transmit all state to other pods
+		pod2podDataInterval = POD2POD_DATA_INTERVAL_URGENT;
+		pod2podUrgent = false;
 	}
 
 	setButtonLEDs();
 
 	if (myPodNum == 1) {
-		if (checkTimer(&lastRunPodData, POD2POD_DATA_INTERVAL)) {
+		if (checkTimer(&lastRunPodData, pod2podDataInterval)) {
 			sendCommandsToRemotePods();
 			sendPodInfo();
+			pod2podDataInterval = POD2POD_DATA_INTERVAL_NORMAL;
 		}
 
-		// Send status/keepalive
 		if (mqttIsOn) {
-			sendStatus(&lastRunStatus);
-			sendHaData(&lastRunSendHaData);
-			sendData(&lastRunSendData);
+			sendStatus(&lastRunStatus);	// Send status/keepalive
+			sendHaData(&lastRunSendHaData, mqttStartupMode);
+			sendData(&lastRunSendData, mqttUrgent || mqttStartupMode);
+			mqttUrgent = false;
+			mqttStartupMode = false;
 		}
 	} else {
-		if (wifiIsOn && checkTimer(&lastRunPodData, POD2POD_DATA_INTERVAL)) {
+		if (wifiIsOn && checkTimer(&lastRunPodData, pod2podDataInterval)) {
 			sendPodInfo();
+			remoteButtons = buttonState::nothingPressed; // consumed by sendPodinfo()
+			pod2podDataInterval = POD2POD_DATA_INTERVAL_NORMAL;
 		}
 	}
 
@@ -761,9 +795,6 @@ getSystemModeFromNumberOne (char *buf)
 	case liftModes::modeUp:
 	case liftModes::modeDown:
 	case liftModes::modeOff:
-		if (mode != pods[0].mode) {
-			resendAllData = true;
-		}
 		pods[0].mode = mode;
 //		pods[0].action = (liftActions)parseInt(buf, "AC=");
 		pods[0].forceMode = fm == 1 ? true : false;
@@ -790,14 +821,15 @@ sendCommandsToRemotePods (void)
 #endif // ! DEBUG_UDP
 }
 
-void
+bool
 getPodMessages (void)
 {
 	char buf[UDP_BUF_SIZ];
 	int packetSize = udp.parsePacket();
 	int loops = 0;
+	bool mqttUrgent = false;
 
-	while ((packetSize > 0) && (loops < (NUM_PODS + 1))) {
+	while (packetSize > 0) {
 #if defined(DEBUG_UDP) && defined(DEBUG_OVER_SERIAL)
 		Serial.print("Received packet of size ");
 		Serial.println(packetSize);
@@ -822,7 +854,9 @@ getPodMessages (void)
 			if (podNum == 0) {
 				getSystemModeFromNumberOne(&buf[0]);
 			} else if (podNum >= 1 && podNum <= NUM_PODS) {
-				getRemotePodStatus(podNum, &buf[0]);
+				if (getRemotePodStatus(podNum, &buf[0])) {
+					mqttUrgent = true;
+				}
 			} else {
 #ifdef DEBUG_UDP
 				udpPacketsReceivedErrors++;
@@ -833,15 +867,21 @@ getPodMessages (void)
 			udpPacketsReceivedErrors++;
 #endif // DEBUG_UDP
 		}
-		packetSize = udp.parsePacket(); // Try to get another.
 		loops++;
+		if (loops > NUM_PODS) {
+			break;
+		}
+		packetSize = udp.parsePacket(); // Try to get another.
 	}
+	return mqttUrgent;
 }
 
-void
+bool
 getRemotePodStatus (int podNum, char *buf)
 {
 	bool goodUpdate = true;
+	bool mqttUrgent = false;
+
 	pods[podNum].batteryPct = parseInt(buf, "BP=");
 	{
 		int batteryMilliVolts = parseInt(buf, "BM=");
@@ -857,7 +897,7 @@ getRemotePodStatus (int podNum, char *buf)
 			goodUpdate = false;
 		} else {
 			if (mode != pods[podNum].mode) {
-				if (myPodNum == 1) resendAllData = true;
+				if (myPodNum == 1) mqttUrgent = true;
 				pods[podNum].mode = mode;
 			}
 		}
@@ -869,7 +909,7 @@ getRemotePodStatus (int podNum, char *buf)
 			goodUpdate = false;
 		} else {
 			if (action != pods[podNum].action) {
-				if (myPodNum == 1) resendAllData = true;
+				if (myPodNum == 1) mqttUrgent = true;
 				pods[podNum].action = action;
 			}
 		}
@@ -880,7 +920,7 @@ getRemotePodStatus (int podNum, char *buf)
 			goodUpdate = false;
 		} else {
 			if (position != pods[podNum].position) {
-				if (myPodNum == 1) resendAllData = true;
+				if (myPodNum == 1) mqttUrgent = true;
 				pods[podNum].position = position;
 			}
 		}
@@ -892,7 +932,7 @@ getRemotePodStatus (int podNum, char *buf)
 		} else {
 			bool ts = (val == 1);
 			if (ts != pods[podNum].topSensorWet) {
-				if (myPodNum == 1) resendAllData = true;
+				if (myPodNum == 1) mqttUrgent = true;
 				pods[podNum].topSensorWet = ts;
 			}
 		}
@@ -904,7 +944,7 @@ getRemotePodStatus (int podNum, char *buf)
 		} else {
 			bool bs = (val == 1);
 			if (bs != pods[podNum].botSensorWet) {
-				if (myPodNum == 1) resendAllData = true;
+				if (myPodNum == 1) mqttUrgent = true;
 				pods[podNum].botSensorWet = bs;
 			}
 		}
@@ -932,6 +972,7 @@ getRemotePodStatus (int podNum, char *buf)
 	if (goodUpdate) {
 		pods[podNum].lastUpdate = getUptimeSeconds();
 	}
+	return mqttUrgent;
 }
 
 void
@@ -942,13 +983,12 @@ sendPodInfo (void)
 	udp.beginPacket(numOneIP, PRIV_UDP_PORT);
 	udp.printf("PN=%d,BP=%d,BM=%d,MO=%d,FM=%c,AC=%d,PO=%d,TS=%c,BS=%c,FB=%d,VV=%s,UT=%ld", myPodNum, myPod->batteryPct, (int)(myPod->batteryVolts * 1000.0),
 		   myPod->mode, myPod->forceMode ? '1' : '0', myPod->action, myPod->position, myPod->topSensorWet ? '1' : '0', myPod->botSensorWet ? '1' : '0',
-		   frontButtons, myPod->version, myPod->uptime);
-	if ((frontButtons != buttonState::nothingPressed) && (myPodNum != 1)) {
+		   remoteButtons, myPod->version, myPod->uptime);
 #ifdef DEBUG_OVER_SERIAL
-		Serial.printf("Sending Front buttons (%d) to #1.\n", frontButtons);
-#endif // DEBUG_OVER_SERIAL
-		frontButtons = buttonState::nothingPressed;
+	if ((remoteButtons != buttonState::nothingPressed) && (myPodNum != 1)) {
+		Serial.printf("Sending buttons (%d) to #1.\n", remoteButtons);
 	}
+#endif // DEBUG_OVER_SERIAL
 #ifndef DEBUG_UDP
 	udp.endPacket();
 #else // ! DEBUG_UDP
@@ -1079,16 +1119,15 @@ engagePodAction (void)
 }
 
 // Read the buttons and save
-void
-readSystemModeFromButtons(void)
+bool
+setSystemModeFromButtons(void)
 {
+	bool updateUrgent = false;
 	buttonState buttons = frontButtons;
 
 	if (buttons == buttonState::nothingPressed) {
 		buttons = remoteButtons;
 	}
-	frontButtons = buttonState::nothingPressed;
-	remoteButtons = buttonState::nothingPressed;
 
 	switch (buttons) {
 	case buttonState::nothingPressed:
@@ -1097,7 +1136,7 @@ readSystemModeFromButtons(void)
 		pods[0].mode = modeUp;
 		pods[0].forceMode = false;
 		pods[0].lastUpdate = getUptimeSeconds();
-		resendAllData = true;
+		updateUrgent = true;
 #ifdef DEBUG_OVER_SERIAL
 		Serial.println("Up button press consumed.");
 #endif // DEBUG_OVER_SERIAL
@@ -1106,7 +1145,7 @@ readSystemModeFromButtons(void)
 		pods[0].mode = modeDown;
 		pods[0].forceMode = false;
 		pods[0].lastUpdate = getUptimeSeconds();
-		resendAllData = true;
+		updateUrgent = true;
 #ifdef DEBUG_OVER_SERIAL
 		Serial.println("Down button press consumed.");
 #endif // DEBUG_OVER_SERIAL
@@ -1115,7 +1154,7 @@ readSystemModeFromButtons(void)
 		pods[0].mode = modeUp;
 		pods[0].forceMode = true;
 		pods[0].lastUpdate = getUptimeSeconds();
-		resendAllData = true;
+		updateUrgent = true;
 #ifdef DEBUG_OVER_SERIAL
 		Serial.println("Up button LONG press consumed.");
 #endif // DEBUG_OVER_SERIAL
@@ -1124,7 +1163,7 @@ readSystemModeFromButtons(void)
 		pods[0].mode = modeDown;
 		pods[0].forceMode = true;
 		pods[0].lastUpdate = getUptimeSeconds();
-		resendAllData = true;
+		updateUrgent = true;
 #ifdef DEBUG_OVER_SERIAL
 		Serial.println("Down button LONG press consumed.");
 #endif // DEBUG_OVER_SERIAL
@@ -1133,20 +1172,22 @@ readSystemModeFromButtons(void)
 		pods[0].mode = modeOff;
 		pods[0].forceMode = false;
 		pods[0].lastUpdate = getUptimeSeconds();
-		resendAllData = true;
+		updateUrgent = true;
 #ifdef DEBUG_OVER_SERIAL
 		Serial.println("Both buttons press consumed.");
 #endif // DEBUG_OVER_SERIAL
 		break;
 	}
+
+	return updateUrgent;
 }
 
 // Read pod water sensors and determine position
 // Sets topSensorWet, botSensorWet, and position
-void
+bool
 readPodState(void)
 {
-	boolean topWet = false, botWet = false;
+	bool topWet = false, botWet = false, updateUrgent = false;
 	int topCount = 0, bottomCount = 0;
 	uint32_t now;
 	static uint32_t almostDownTime = 0, almostUpTime = 0;
@@ -1172,7 +1213,7 @@ readPodState(void)
 		topSensorChanges++;
 #endif // DEBUG_SENSORS
 		myPod->topSensorWet = topWet;
-		resendAllData = true;
+		updateUrgent = true;
 	}
 	if (myPod->botSensorWet != botWet) {
 #ifdef DEBUG_OVER_SERIAL
@@ -1182,7 +1223,7 @@ readPodState(void)
 		botSensorChanges++;
 #endif // DEBUG_SENSORS
 		myPod->botSensorWet = botWet;
-		resendAllData = true;
+		updateUrgent = true;
 	}
 
 	now = millis();
@@ -1223,6 +1264,8 @@ readPodState(void)
 	myPod->position = newPosition;
 	myPod->uptime = getUptimeSeconds();
 	myPod->lastUpdate = getUptimeSeconds();
+
+	return updateUrgent;
 }
 
 void
@@ -1483,7 +1526,7 @@ checkWifiStatus(boolean initialConnect)
 			ElegantOTA.begin(otaServer);    // Start ElegantOTA
 			otaServer->begin();
 		}
-		resendAllData = true;
+		wifiRestarted = true;
 #ifdef DEBUG_OVER_SERIAL
 		Serial.printf("WiFi IP is %s (%s)\n", WiFi.localIP().toString().c_str(), WiFi.SSID().c_str());
 		byte *bssid = WiFi.BSSID();
@@ -1770,13 +1813,13 @@ updateDisplayInfo()
 		dbgIdx = 5;
 #endif // DEBUG_WIFI
 #ifdef DEBUG_MQTT
-	} else if (dbgIdx < 6) {
+	} else if ((dbgIdx < 6) && (myPodNum == 1)) {
 		snprintf(line4, sizeof(line4), "MQTT CB: %lu/%lu/%lu/%lu", mqttRcvCallbacks, mqttUnkCallbacks, mqttBadCallbacks, mqttPubCallbacks);
 		dbgIdx = 6;
-	} else if (dbgIdx < 9) {
+	} else if ((dbgIdx < 9) && (myPodNum == 1)) {
 		snprintf(line4, sizeof(line4), "MQTT conn: %lu", mqttConnects);
 		dbgIdx = 9;
-	} else if (dbgIdx < 10) {
+	} else if ((dbgIdx < 10) && (myPodNum == 1)) {
 		snprintf(line4, sizeof(line4), "MQTT pub: %lu/%lu/%lu", mqttPublishSuccess, mqttPublishFail, mqttPublishNoMem);
 		dbgIdx = 10;
 #endif // DEBUG_MQTT
@@ -1927,7 +1970,7 @@ onMqttConnect(bool sessionPresent)
 
 	// Once we set up the first time, any reconnects should be persistent sessions
 	mqttClient.setCleanSession(false);
-	resendAllData = true;
+	mqttStartupMode = true;
 }
 
 mqttState *
@@ -2361,18 +2404,27 @@ addToPayload(publishEntry *publish, const char* addition)
 
 #define MQTT_PUBLISH_BURST 4
 void
-sendData(unsigned long *lastRun)
+sendData(unsigned long *lastRun, bool urgent)
 {
 	static int nextToSend = 0;
+	static unsigned long dataInterval = DATA_INTERVAL_NORMAL;
 	int curSent = 0;
 	int numSysEntities = sizeof(_mqttSysEntities) / sizeof(struct mqttState);
 	int totalEntities = numSysEntities + NUM_PODS;
 
-	if ((nextToSend >= totalEntities) && checkTimer(lastRun, DATA_INTERVAL)) {
-		nextToSend = 0;  // Only restart if we finished previous run.
+	if (urgent) {
+		dataInterval = DATA_INTERVAL_URGENT;
+		if (*lastRun == 0) {
+			checkTimer(lastRun, dataInterval); // Just reset timer.
+		}
 	}
 
-	for (int i = nextToSend; (i < totalEntities) && (curSent < MQTT_PUBLISH_BURST); i++) {
+	if ((nextToSend >= totalEntities) && checkTimer(lastRun, dataInterval)) {
+		nextToSend = 0;  // Only restart if we finished previous run.
+		dataInterval = DATA_INTERVAL_NORMAL;
+	}
+
+	for (int i = nextToSend; (i < totalEntities) && (curSent < MQTT_PUBLISH_BURST); i++, nextToSend++) {
 		int podNum, entityIdx;
 		struct mqttState *entity;
 		publishEntry *publish;
@@ -2396,25 +2448,34 @@ sendData(unsigned long *lastRun)
 			break;
 		}
 
-		nextToSend++;
 		curSent++;
 	}
 }
 
 void
-sendHaData(unsigned long *lastRun)
+sendHaData(unsigned long *lastRun, bool startupMode)
 {
 	static int nextToSend = 0;
+	static unsigned long haDataInterval = HA_DATA_INTERVAL_INITIAL;
 	int curSent = 0;
 	int numSysEntities = sizeof(_mqttSysEntities) / sizeof(struct mqttState);
 	int numPodEntities = sizeof(_mqttPodEntities) / sizeof(struct mqttState);
 	int totalEntities = numSysEntities + (numPodEntities * NUM_PODS);
 
-	if ((nextToSend >= totalEntities) && checkTimer(lastRun, HA_DATA_INTERVAL)) {
-		nextToSend = 0;  // Only restart if we finished previous run.
+	if (startupMode) {
+		// Will send once immediately. Then again after the "initial" interval.  Then "normal"
+		nextToSend = 0;
+		haDataInterval = HA_DATA_INTERVAL_INITIAL;
+		*lastRun = 0;
+		checkTimer(lastRun, haDataInterval); // Just reset timer.
 	}
 
-	for (int i = nextToSend; (i < totalEntities) && (curSent < MQTT_PUBLISH_BURST); i++) {
+	if ((nextToSend >= totalEntities) && checkTimer(lastRun, haDataInterval)) {
+		nextToSend = 0;  // Only restart if we finished previous run.
+		haDataInterval = HA_DATA_INTERVAL_NORMAL;
+	}
+
+	for (int i = nextToSend; (i < totalEntities) && (curSent < MQTT_PUBLISH_BURST); i++, nextToSend++) {
 		int podNum, entityIdx;
 		struct mqttState *entity;
 		publishEntry *publish;
@@ -2443,7 +2504,6 @@ sendHaData(unsigned long *lastRun)
 			break;
 		}
 
-		nextToSend++;
 		curSent++;
 	}
 }
@@ -2539,7 +2599,7 @@ mqttCallback(char *topic, char *message, int retain, int qos, bool dup)
 	// Special case for Home Assistant itself
 	if (strcmp(topic, MQTT_SUB_HOMEASSISTANT) == 0) {
 		if (strcmp(mqttIncomingPayload, "online") == 0) {
-			resendAllData = true;
+			mqttCallbackRcvd = true;
 		} else {
 #ifdef DEBUG_OVER_SERIAL
 			Serial.println("Unknown homeassistant/status: ");
@@ -2618,7 +2678,7 @@ mqttCallback(char *topic, char *message, int retain, int qos, bool dup)
 					mqttBadCallbacks++;
 #endif // DEBUG_MQTT
 				}
-				resendAllData = true;
+				mqttCallbackRcvd = true;
 				break;
 			default:
 #ifdef DEBUG_OVER_SERIAL

@@ -158,7 +158,7 @@ Author:		David Carrel
 #define RELAY_ON  HIGH
 #define RELAY_OFF LOW
 
-// Values to control sensors - NC sensor connected to GND
+// Values to control sensors - N/O sensor with external pullup resistor and wired to GND
 #define SENSOR_PIN_MODE INPUT
 #define SENSOR_WET      LOW
 
