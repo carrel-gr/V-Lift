@@ -44,7 +44,7 @@
 void setButtonLEDs(int freq = 0);
 
 // Device parameters
-char _version[VERSION_STR_LEN] = "v2.56";
+char _version[VERSION_STR_LEN] = "v2.58";
 char myUniqueId[17];
 char statusTopic[128];
 
@@ -854,7 +854,14 @@ getPodMessages (void)
 			if (podNum == 0) {
 				getSystemModeFromNumberOne(&buf[0]);
 			} else if (podNum >= 1 && podNum <= NUM_PODS) {
-				if (getRemotePodStatus(podNum, &buf[0])) {
+				if (podNum == myPodNum) {
+#ifdef DEBUG_OVER_SERIAL
+					Serial.println("Received pod update from self.  Ignoring ...");
+#endif // DEBUG_OVER_SERIAL
+#ifdef DEBUG_UDP
+					udpPacketsReceivedErrors++;
+#endif // DEBUG_UDP
+				} else if (getRemotePodStatus(podNum, &buf[0])) {
 					mqttUrgent = true;
 				}
 			} else {
