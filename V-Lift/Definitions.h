@@ -51,11 +51,11 @@ Author:		David Carrel
 #define DOWN_LED_PIN	D6
 
 // Set your battery MAX/MIN voltage corresponding to 100% and 0%
-// For 2 12V AGM batteries in series, nominal values are 24 and 23
+// For 2 12V AGM SLA batteries in series, nominal values are 25.78 and 23.26
+//     and 27.6 when charging
 // For MakerFocus 10000mAh : max 4.16, min 3.0 (nominal), mult 1.03740648
-// DAVE
-#define BAT_MAX 24
-#define BAT_MIN 23
+#define BAT_MAX 25.78
+#define BAT_MIN 23.26
 // A resistor voltage divider is used to bring the voltage into the ADC range
 // Divider = (top_resistor + bottom_resistor) / bottom_resistor
 // top = 470k, bottom = 47k
