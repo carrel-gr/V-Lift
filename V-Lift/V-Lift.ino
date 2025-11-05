@@ -211,11 +211,11 @@ void setup()
 	_display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS);  // initialize OLED
 	_display.clearDisplay();
 	_display.display();
-	updateOLED(false, myUniqueId, "Starting...", _version);
+	updateOLED(false, "", "Starting...", _version);
 #endif // USE_DISPLAY
 
 #ifdef DEBUG_OVER_SERIAL
-	Serial.printf("Starting %s\n", myUniqueId);
+	Serial.printf("Starting...");
 	delay(500);
 #endif
 
