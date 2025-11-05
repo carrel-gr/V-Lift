@@ -644,6 +644,7 @@ loop ()
 			// Set system (pods[0]) mode based on buttons and system action
 			pod2podUrgent = true;
 		}
+		// setSystemModeFromButtons() always consumes both buttons so clear them now.
 		frontButtons = buttonState::nothingPressed;
 		remoteButtons = buttonState::nothingPressed;
 	} else {
@@ -985,14 +986,15 @@ getRemotePodStatus (int podNum, char *buf)
 void
 sendPodInfo (void)
 {
-	IPAddress numOneIP(192, 168, PRIV_WIFI_SUBNET, 255);
+	IPAddress bcastIP(192, 168, PRIV_WIFI_SUBNET, 255);
+	buttonState tmpButtons = (myPodNum == 1) ? buttonState::nothingPressed : remoteButtons;
 
-	udp.beginPacket(numOneIP, PRIV_UDP_PORT);
+	udp.beginPacket(bcastIP, PRIV_UDP_PORT);
 	udp.printf("PN=%d,BP=%d,BM=%d,MO=%d,FM=%c,AC=%d,PO=%d,TS=%c,BS=%c,FB=%d,VV=%s,UT=%ld", myPodNum, myPod->batteryPct, (int)(myPod->batteryVolts * 1000.0),
 		   myPod->mode, myPod->forceMode ? '1' : '0', myPod->action, myPod->position, myPod->topSensorWet ? '1' : '0', myPod->botSensorWet ? '1' : '0',
-		   remoteButtons, myPod->version, myPod->uptime);
+		   tmpButtons, myPod->version, myPod->uptime);
 #ifdef DEBUG_OVER_SERIAL
-	if ((remoteButtons != buttonState::nothingPressed) && (myPodNum != 1)) {
+	if (tmpButtons != buttonState::nothingPressed) {
 		Serial.printf("Sending buttons (%d) to #1.\n", remoteButtons);
 	}
 #endif // DEBUG_OVER_SERIAL
