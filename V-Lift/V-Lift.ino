@@ -202,7 +202,9 @@ void setup()
 
 #ifdef DEBUG_OVER_SERIAL
 	Serial.begin(9600);
-#endif // DEBUG_OVER_SERIAL
+	Serial.printf("Starting...");
+	delay(500);
+#endif
 
 	// Wire.setClock(10000);
 
@@ -213,11 +215,6 @@ void setup()
 	_display.display();
 	updateOLED(false, "", "Starting...", _version);
 #endif // USE_DISPLAY
-
-#ifdef DEBUG_OVER_SERIAL
-	Serial.printf("Starting...");
-	delay(500);
-#endif
 
 	for (int podIdx = 0; podIdx <= NUM_PODS; podIdx++) {
 		pods[podIdx].lastUpdate = 0;
