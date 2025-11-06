@@ -2606,10 +2606,15 @@ mqttCallback(char *topic, char *message, int retain, int qos, bool dup)
 	if (strcmp(topic, MQTT_SUB_HOMEASSISTANT) == 0) {
 		if (strcmp(mqttIncomingPayload, "online") == 0) {
 			mqttCallbackRcvd = true;
+		} else if (strcmp(mqttIncomingPayload, "offline") == 0) {
+			// Nothing to do.
 		} else {
 #ifdef DEBUG_OVER_SERIAL
 			Serial.println("Unknown homeassistant/status: ");
 #endif // DEBUG_OVER_SERIAL
+#ifdef DEBUG_MQTT
+			mqttBadCallbacks++;
+#endif // DEBUG_MQTT
 		}
 		return; // No further processing needed.
 	} else {
