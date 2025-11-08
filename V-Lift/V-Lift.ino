@@ -4,30 +4,26 @@
  * Author:		David Carrel
  */
 
-// DAVE -  todo -- ADD duty-cycle
-// DAVE - _version
-// can softAP do more than 4?
-// scanNetworks - make async - do I need to call it?
+// DAVE -  todo --
+// ADD duty-cycle
 // handle top sensor going wet w/o bottom - longer delay after blowing?
-// make 100% battery be higher voltage to encompass more range - maybe send all voltages to MQTT
+// Add back web config
+//      - try reducing TX power - value is (dBm * 4) so 17dBm == 68
+//#define DAVE_TEST_POWER 68
 
 #define REMOVE_WEB_CONFIG
 
-#include <bit>
-#include <bitset>
 #include <cstdint>
-#include <iostream>
 // Supporting files
 #include "Definitions.h"
 #include <Arduino.h>
 #include <driver/rtc_io.h>
-#include <WiFi.h>
+#include <esp_netif.h>
+#include <esp_wifi.h>
 #include <NetworkUdp.h>
-#include <WebServer.h>
 #ifndef MP_XIAO_ESP32C6
 #define LED_BUILTIN 2
 #endif // ! MP_XIAO_ESP32C6
-#include <DNSServer.h>
 #ifndef REMOVE_WEB_CONFIG
 #include <WiFiManager.h>
 #endif // ! REMOVE_WEB_CONFIG
@@ -40,11 +36,10 @@
 #include <Adafruit_SSD1306.h>
 #endif // USE_DISPLAY
 
-#define popcount __builtin_popcount
 void setButtonLEDs(int freq = 0);
 
 // Device parameters
-char _version[VERSION_STR_LEN] = "v2.58";
+char _version[VERSION_STR_LEN] = "v2.73";
 char myUniqueId[17];
 char statusTopic[128];
 
@@ -53,12 +48,19 @@ podState *myPod;
 podState pods[NUM_PODS + 1];  // 0 is (virtual) system
 
 // WiFi parameters
-#ifdef USE_SSL
-const char* rootCA = ROOT_CA;
-#endif // USE_SSL
+volatile bool wifiConnected = false;
+unsigned int wifiTries = 0;
 #ifdef DAVE_WIFI_POWER
 wifi_power_t wifiPower = WIFI_POWER_11dBm; // Will bump to max before setting
 #endif // DAVE_WIFI_POWER
+#ifdef DEBUG_WIFI
+volatile uint wifiConnectedCnt = 0;
+uint32_t wifiReconnects = 0;
+#endif // DEBUG_WIFI
+
+#ifdef USE_SSL
+const char* rootCA = ROOT_CA;
+#endif // USE_SSL
 
 // MQTT parameters
 PsychicMqttClient mqttClient;
@@ -114,11 +116,6 @@ char _oledLine4[OLED_CHARACTER_WIDTH] = "";
 
 // Config handling
 Config config;
-
-unsigned int wifiTries = 0;
-#ifdef DEBUG_WIFI
-uint32_t wifiReconnects = 0;
-#endif // DEBUG_WIFI
 
 /*
  * Home Assistant auto-discovered values
@@ -182,6 +179,8 @@ static struct mqttState _mqttPodEntities[] =
 Adafruit_SSD1306 _display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, 0);
 #endif // USE_DISPLAY
 
+#define MY_ERROR_CHECK(_func) ESP_ERROR_CHECK_WITHOUT_ABORT(_func)
+
 /*
  * setup
  *
@@ -202,7 +201,7 @@ void setup()
 
 #ifdef DEBUG_OVER_SERIAL
 	Serial.begin(9600);
-	Serial.printf("Starting...");
+	Serial.println("Starting...");
 	delay(500);
 #endif
 
@@ -223,12 +222,19 @@ void setup()
 	preferences.begin(DEVICE_NAME, true); // RO
 	config.wifiSSID = preferences.getString(PREF_NAME_SSID, "");
 	config.wifiPass = preferences.getString(PREF_NAME_PASS, "");
+#ifdef DAVE_TEST_SSID
+	config.wifiSSID = DAVE_TEST_SSID;
+	config.wifiPass = DAVE_TEST_PASS;
+#endif // DAVE_TEST_SSID
 	config.mqttSrvr = preferences.getString(PREF_NAME_MQTT_SRV, "");
 	config.mqttPort = preferences.getInt(PREF_NAME_MQTT_PORT, 0);
 	config.mqttUser = preferences.getString(PREF_NAME_MQTT_USER, "");
 	config.mqttPass = preferences.getString(PREF_NAME_MQTT_PASS, "");
 #ifdef MP_XIAO_ESP32C6
 	config.extAntenna = preferences.getBool(PREF_NAME_EXT_ANT, false);
+#ifdef DAVE_TEST_EXT_ANT
+	config.extAntenna = DAVE_TEST_EXT_ANT;
+#endif // DAVE_TEST_EXT_ANT
 #endif // MP_XIAO_ESP32C6
 	config.podNumber = preferences.getInt(PREF_NAME_POD_NUM, -1);
 	preferences.end();
@@ -245,22 +251,30 @@ void setup()
 		myPod = &pods[config.podNumber];
 	}
 
-//	WiFi.persistent(false);
-//	WiFi.disconnect(true, true);
-	WiFi.mode(WIFI_MODE_NULL);
+	MY_ERROR_CHECK(esp_wifi_stop());
 	delay(100);
+	MY_ERROR_CHECK(esp_netif_init());
+	MY_ERROR_CHECK(esp_event_loop_create_default());
+	/* Register Event handler */
+	MY_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
+							     &wifiEventHandler, NULL, NULL));
+	MY_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+							     &wifiEventHandler, NULL, NULL));
+	wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+	cfg.nvs_enable = false;
+	MY_ERROR_CHECK(esp_wifi_init(&cfg));
 
-	// If config is not setup, then enter config mode
+	// Set WiFi mode and our unique identity.
 	if (myPodNum == 1) {
 		uint8_t mac[6];
-		// Set our unique identity.
-		WiFi.mode(WIFI_AP_STA); // Kick WiFi just enough so MAC is readable
-		WiFi.macAddress(mac);
+		MY_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
+		MY_ERROR_CHECK(esp_wifi_get_mac(WIFI_IF_STA, mac));
 		snprintf(myUniqueId, sizeof(myUniqueId), DEVICE_NAME "-%0X%02X%02X", mac[3] & 0xf, mac[4], mac[5]);
 		snprintf(statusTopic, sizeof(statusTopic), DEVICE_NAME "/%s/status", myUniqueId);
 
+		// If config is not setup, then enter config mode
 		if ((config.wifiSSID == "") ||
-		    (config.wifiPass == "") ||
+//		    (config.wifiPass == "") ||
 		    (config.mqttSrvr == "") ||
 		    (config.mqttPort == 0) ||
 		    (config.mqttUser == "") ||
@@ -269,10 +283,9 @@ void setup()
 			ESP.restart();
 		}
 	} else {
-		WiFi.mode(WIFI_STA);
+		MY_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
 		snprintf(myUniqueId, sizeof(myUniqueId), DEVICE_NAME "-pod%d", myPodNum);
 	}
-	WiFi.hostname(myUniqueId);
 #ifdef USE_DISPLAY
 	{
 		char line3[OLED_CHARACTER_WIDTH];
@@ -378,7 +391,6 @@ getPodNumFromButton (void)
 	return podNum;
 }
 
-#ifdef DAVE_EXT_ANT
 boolean
 getExtAntFromButton (void)
 {
@@ -404,7 +416,6 @@ getExtAntFromButton (void)
 	}
 	return extAnt;
 }
-#endif // DAVE_EXT_ANT
 
 void
 configLoop (void)
@@ -465,9 +476,7 @@ configHandler(void)
 
 	delete otaServer;
 	otaServer = NULL;
-	WiFi.disconnect();
-	WiFi.softAPdisconnect();
-	WiFi.mode(WIFI_MODE_NULL);
+	esp_wifi_stop();
 	delay(100);
 
 	WiFiManager wifiManager;
@@ -581,14 +590,18 @@ loop ()
 		Preferences preferences;
 		configButtonPressed = false;
 		myPodNum = getPodNumFromButton();
-#if defined(MP_XIAO_ESP32C6) && defined(DAVE_EXT_ANT)
+#if defined(MP_XIAO_ESP32C6)
 		boolean extAnt = getExtAntFromButton();
-#endif // MP_XIAO_ESP32C6 && DAVE_EXT_ANT
+#endif // MP_XIAO_ESP32C6
 		preferences.begin(DEVICE_NAME, false); // RW
 		preferences.putInt(PREF_NAME_POD_NUM, myPodNum);
-#if defined(MP_XIAO_ESP32C6) && defined(DAVE_EXT_ANT)
+#if defined(MP_XIAO_ESP32C6)
 		preferences.putBool(PREF_NAME_EXT_ANT, extAnt);
-#endif // MP_XIAO_ESP32C6 && DAVE_EXT_ANT
+#endif // MP_XIAO_ESP32C6
+#ifdef DAVE_TEST_SSID
+		preferences.putString(PREF_NAME_SSID, DAVE_TEST_SSID);
+		preferences.putString(PREF_NAME_PASS, DAVE_TEST_PASS);
+#endif // DAVE_TEST_SSID
 		preferences.end();
 		if (myPodNum == 1) {
 #ifndef REMOVE_WEB_CONFIG
@@ -1383,112 +1396,312 @@ getUptimeSeconds(void)
 }
 
 /*
+ * wifiEventHandler()
+ * wifi callback function
+ */
+static void wifiEventHandler(void *arg, esp_event_base_t eventBase,
+                               int32_t eventId, void *eventData)
+{
+	if (eventBase == WIFI_EVENT) {
+		switch (eventId) {
+		case WIFI_EVENT_AP_STACONNECTED:
+#if defined(DEBUG_OVER_SERIAL) && defined(DEBUG_WIFI)
+			{
+				wifi_event_ap_staconnected_t *event = (wifi_event_ap_staconnected_t *) eventData;
+				Serial.printf("Remote WiFi " MACSTR " joined, AID=%d\n", MAC2STR(event->mac), event->aid);
+			}
+#endif // DEBUG_OVER_SERIAL && DEBUG_WIFI
+			break;
+		case WIFI_EVENT_AP_STADISCONNECTED:
+#if defined(DEBUG_OVER_SERIAL) && defined(DEBUG_WIFI)
+			{
+				wifi_event_ap_stadisconnected_t *event = (wifi_event_ap_stadisconnected_t *) eventData;
+				Serial.printf("Remote WiFi " MACSTR " left, AID=%d, reason:%d\n", MAC2STR(event->mac), event->aid, event->reason);
+			}
+#endif // DEBUG_OVER_SERIAL && DEBUG_WIFI
+			break;
+		case WIFI_EVENT_STA_START:
+			esp_wifi_connect();
+#if defined(DEBUG_OVER_SERIAL) && defined(DEBUG_WIFI)
+			Serial.println("Station WiFi started");
+#endif // DEBUG_OVER_SERIAL && DEBUG_WIFI
+			break;
+		case WIFI_EVENT_STA_CONNECTED:
+#if defined(DEBUG_OVER_SERIAL) && defined(DEBUG_WIFI)
+			{
+				wifi_event_sta_connected_t *event = (wifi_event_sta_connected_t *) eventData;
+				Serial.printf("Station WiFi connected to [" MACSTR "] chan: %d\n", MAC2STR(event->bssid), event->channel);
+			}
+#endif // DEBUG_OVER_SERIAL && DEBUG_WIFI
+			wifiConnected = true;
+#ifdef DEBUG_WIFI
+			wifiConnectedCnt = wifiConnectedCnt + 1;
+#endif // DEBUG_WIFI
+			break;
+		case WIFI_EVENT_STA_DISCONNECTED:
+#if defined(DEBUG_OVER_SERIAL) && defined(DEBUG_WIFI)
+			Serial.println("Station WiFi disconnected");
+#endif // DEBUG_OVER_SERIAL && DEBUG_WIFI
+			wifiConnected = false;
+			break;
+		}
+	} else if (eventBase == IP_EVENT) {
+		if (eventId == IP_EVENT_STA_GOT_IP) {
+#if defined(DEBUG_OVER_SERIAL) && defined(DEBUG_WIFI)
+			ip_event_got_ip_t *event = (ip_event_got_ip_t *) eventData;
+			Serial.printf("Got IP:" IPSTR "\n", IP2STR(&event->ip_info.ip));
+#endif // DEBUG_OVER_SERIAL && DEBUG_WIFI
+		}
+	}
+}
+
+
+/*
  * setupWifi
  *
  * Connect to WiFi
  */
-void
-setupWifi(/*unsigned int tries*/)
+bool
+setupWifi(esp_netif_t **netifStaPtr, esp_netif_t **netifApPtr)
 {
+	esp_netif_ip_info_t privIpInfo;
+	IP4_ADDR(&privIpInfo.ip, 192, 168, PRIV_WIFI_SUBNET, myPodNum);
+	IP4_ADDR(&privIpInfo.gw, 192, 168, PRIV_WIFI_SUBNET, 1);
+	IP4_ADDR(&privIpInfo.netmask, 255, 255, 255, 0);
 	IPAddress privIP(192, 168, PRIV_WIFI_SUBNET, myPodNum); // IP for the AP
-	IPAddress privGateway(192, 168, PRIV_WIFI_SUBNET, 1); // Gateway IP (same as local_IP for AP)
-	IPAddress privSubnet(255, 255, 255, 0); // Subnet mask
+
+	esp_wifi_stop();
+
+	if (*netifStaPtr != NULL) {
+		esp_netif_destroy_default_wifi(*netifStaPtr);
+		*netifStaPtr = NULL;
+	}
+	if (*netifApPtr != NULL) {
+		esp_netif_destroy_default_wifi(*netifApPtr);
+		*netifApPtr = NULL;
+	}
 
 	if (myPodNum == 1) {
-		WiFi.disconnect();
-		WiFi.softAPdisconnect();
-		WiFi.mode(WIFI_MODE_NULL);
-		delay(100);
+		uint8_t bestChan = 0;
+		static uint8_t lastChan = 0;
+		int32_t bestRSSI = -100;
+		uint8_t bestBSSID[6];
 
 		// Set up in AP & Station Mode
-		WiFi.mode(WIFI_AP_STA);
-		delay(100);
-		WiFi.hostname(myUniqueId);
-		// Helps when multiple APs for our SSID
-//		WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
-//		WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
-//		WiFi.softAP(PRIV_WIFI_SSID, PRIV_WIFI_PASS);
-		WiFi.softAPConfig(privIP, privGateway, privSubnet);
-		delay(100);
-		WiFi.softAP(PRIV_WIFI_SSID, PRIV_WIFI_PASS, MY_WIFI_CHANNEL, 0, NUM_PODS);
+		MY_ERROR_CHECK(esp_wifi_start());
 		delay(100);
 
-		// Set these up here for pod #1  because SoftAP never goes away
-		udp.begin(privIP, PRIV_UDP_PORT);
-		otaServer = new WebServer(privIP, 80);
-		ElegantOTA.begin(otaServer);    // Start ElegantOTA
-		otaServer->begin();
+		MY_ERROR_CHECK(esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW_HT20));
+		MY_ERROR_CHECK(esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT20));
+#ifdef DAVE_TEST_POWER
+		MY_ERROR_CHECK(esp_wifi_set_max_tx_power(DAVE_TEST_POWER));
+#endif // DAVE_TEST_POWER
+		MY_ERROR_CHECK(esp_wifi_set_protocol(WIFI_IF_AP, WIFI_PROTOCOL_11B|WIFI_PROTOCOL_11G|WIFI_PROTOCOL_11N|WIFI_PROTOCOL_11AX));
+		MY_ERROR_CHECK(esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B|WIFI_PROTOCOL_11G|WIFI_PROTOCOL_11N|WIFI_PROTOCOL_11AX));
 
-//		// Helps when multiple APs for our SSID
-//		WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
-//		WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
-//		WiFi.enableLongRange(true);
-//		delay(100);
-		WiFi.begin(config.wifiSSID.c_str(), config.wifiPass.c_str(), MY_WIFI_CHANNEL);
-	} else {
-		WiFi.disconnect();
-		WiFi.mode(WIFI_MODE_NULL);
-		delay(100);
-
-		// Set up in Station Mode - Will be connecting to #1's access point
-		WiFi.mode(WIFI_STA);
-		delay(100);
-		WiFi.hostname(myUniqueId);
-		WiFi.config(privIP, privGateway, privGateway, privSubnet);
-		delay(100);
-		WiFi.begin(PRIV_WIFI_SSID, PRIV_WIFI_PASS);
-	}
-	WiFi.setAutoReconnect(true);
-
-#ifdef DAVE_WIFI_POWER
-	if (tries != 0) { // Don't change/set power the first time through.
-		switch (wifiPower) {
-		case WIFI_POWER_19_5dBm:
-			wifiPower = WIFI_POWER_19dBm;
-			break;
-		case WIFI_POWER_19dBm:
-			wifiPower = WIFI_POWER_18_5dBm;
-			break;
-		case WIFI_POWER_18_5dBm:
-			wifiPower = WIFI_POWER_17dBm;
-			break;
-		case WIFI_POWER_17dBm:
-			wifiPower = WIFI_POWER_15dBm;
-			break;
-		case WIFI_POWER_15dBm:
-			wifiPower = WIFI_POWER_13dBm;
-			break;
-		case WIFI_POWER_13dBm:
-			wifiPower = WIFI_POWER_11dBm;
-			break;
-		case WIFI_POWER_11dBm:
-		default:
-			wifiPower = WIFI_POWER_19_5dBm;
-			break;
+		// Pick channel
+		bestChan = 0;
+		bestRSSI = -100;
+		for (uint8_t chan = 1; chan <= 11; chan += 5) {  // Channels 1, 6, & 11
+			esp_err_t ret1, ret2;
+			wifi_ap_record_t scanRecord;
+#if defined(DEBUG_OVER_SERIAL) && defined(DEBUG_WIFI)
+			unsigned long before;
+#endif // DEBUG_OVER_SERIAL && DEBUG_WIFI
+			{
+				wifi_scan_config_t *scanCfg = (wifi_scan_config_t *)calloc(1, sizeof(wifi_scan_config_t));
+				scanCfg->ssid = (uint8_t *)config.wifiSSID.c_str();
+				scanCfg->channel = chan;
+#if defined(DEBUG_OVER_SERIAL) && defined(DEBUG_WIFI)
+				before = millis();
+#endif // DEBUG_OVER_SERIAL && DEBUG_WIFI
+				ret1 = esp_wifi_scan_start(scanCfg, true);
+				free(scanCfg);
+			}
+			if (ret1 == ESP_OK) {
+				ret2 = esp_wifi_scan_get_ap_record(&scanRecord);
+			} else {
+#if defined(DEBUG_OVER_SERIAL) && defined(DEBUG_WIFI)
+				Serial.println("scan_start failed.");
+#endif // DEBUG_OVER_SERIAL && DEBUG_WIFI
+				ret2 = -1;
+			}
+			esp_wifi_clear_ap_list();
+#if defined(DEBUG_OVER_SERIAL) && defined(DEBUG_WIFI)
+			if (ret2 == ESP_OK) {
+				Serial.printf("Scan %hhu/ssid returned %d/%d [" MACSTR "] (%lu msec) RSSI=%d -", chan, ret1, ret2,
+					      MAC2STR(scanRecord.bssid), millis() - before, scanRecord.rssi);
+				if (scanRecord.phy_11b) Serial.print(" B");
+				if (scanRecord.phy_11g) Serial.print(" G");
+				if (scanRecord.phy_11n) Serial.print(" N");
+				if (scanRecord.phy_11ax) Serial.print(" AX");
+				Serial.println(".");
+			} else {
+				Serial.println("Scan record unavailable.");
+			}
+#endif // DEBUG_OVER_SERIAL && DEBUG_WIFI
+			if ((ret2 == ESP_OK) && (scanRecord.rssi > bestRSSI) && (scanRecord.rssi < -10)) {
+				bestRSSI = scanRecord.rssi;
+				bestChan = chan;
+				memcpy(bestBSSID, scanRecord.bssid, 6);
+			}
 		}
-		WiFi.setTxPower(wifiPower);
+#if defined(DEBUG_OVER_SERIAL) && defined(DEBUG_WIFI)
+		Serial.printf("Best channel is %hhd\n", bestChan);
+#endif // DEBUG_OVER_SERIAL && DEBUG_WIFI
+		esp_wifi_stop();
+
+		if (bestChan == 0) {
+			return false;
+		}
+
+		// Setup SoftAP
+		if (bestChan != lastChan) {
+			udp.clear();
+			udp.stop();
+			if (otaServer) {
+				delete otaServer;
+				otaServer = NULL;
+			}
+			delay(100);
+		}
+
+		esp_netif_t *netifAp = esp_netif_create_default_wifi_ap();
+		esp_netif_dhcps_stop(netifAp);
+		esp_netif_set_ip_info(netifAp, &privIpInfo);
+		esp_netif_set_hostname(netifAp, myUniqueId);
+		*netifApPtr = netifAp;
+		{
+			wifi_config_t *wifiApConfig = (wifi_config_t *)calloc(1, sizeof(wifi_config_t));
+			strlcpy((char *)wifiApConfig->ap.ssid, PRIV_WIFI_SSID, sizeof(wifiApConfig->ap.ssid));
+			strlcpy((char *)wifiApConfig->ap.password, PRIV_WIFI_PASS, sizeof(wifiApConfig->ap.password));
+			wifiApConfig->ap.ssid_len = strlen(PRIV_WIFI_SSID);
+			wifiApConfig->ap.channel = bestChan;
+			wifiApConfig->ap.authmode = WIFI_AUTH_WPA2_PSK;
+			wifiApConfig->ap.max_connection = (NUM_PODS + 1);
+			MY_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, wifiApConfig));
+			free(wifiApConfig);
+		}
+		if (bestChan != lastChan) {
+			lastChan = bestChan;
+			// Set up here for pod #1 because SoftAP usually doesn't go away
+			udp.begin(privIP, PRIV_UDP_PORT);
+#ifndef REMOVE_OTA
+			otaServer = new WebServer(privIP, 80);
+			ElegantOTA.begin(otaServer);    // Start ElegantOTA
+			otaServer->begin();
+#endif // ! REMOVE_OTA
+		}
+
+		// Setup Station
+		esp_netif_t *netifSta = esp_netif_create_default_wifi_sta();
+		esp_netif_set_hostname(netifSta, myUniqueId);
+		*netifStaPtr = netifSta;
+
+		{
+			wifi_config_t *wifiStaConfig = (wifi_config_t *)calloc(1, sizeof(wifi_config_t));
+			strlcpy((char *)wifiStaConfig->sta.ssid, config.wifiSSID.c_str(), sizeof(wifiStaConfig->sta.ssid));
+			strlcpy((char *)wifiStaConfig->sta.password, config.wifiPass.c_str(), sizeof(wifiStaConfig->sta.password));
+			wifiStaConfig->sta.channel = bestChan;
+			wifiStaConfig->sta.bssid_set = true;
+			memcpy(wifiStaConfig->sta.bssid, bestBSSID, sizeof(wifiStaConfig->sta.bssid));
+			wifiStaConfig->sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+			MY_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, wifiStaConfig));
+			free(wifiStaConfig);
+		}
+	} else {
+		// Set up in Station Mode - Will be connecting to #1's access point
+		MY_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+
+		if (*netifStaPtr != NULL) {
+			esp_netif_destroy_default_wifi(*netifStaPtr);
+		}
+		esp_netif_t *netifSta = esp_netif_create_default_wifi_sta();
+		esp_netif_dhcpc_stop(netifSta);
+		esp_netif_set_ip_info(netifSta, &privIpInfo);
+		esp_netif_set_hostname(netifSta, myUniqueId);
+		*netifStaPtr = netifSta;
+
+		{
+			wifi_config_t *wifiStaConfig = (wifi_config_t *)calloc(1, sizeof(wifi_config_t));
+			strlcpy((char *)wifiStaConfig->sta.ssid, PRIV_WIFI_SSID, sizeof(wifiStaConfig->sta.ssid));
+			strlcpy((char *)wifiStaConfig->sta.password, PRIV_WIFI_PASS, sizeof(wifiStaConfig->sta.password));
+			wifiStaConfig->sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+			MY_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, wifiStaConfig));
+			free(wifiStaConfig);
+		}
 	}
-#endif // DAVE_WIFI_POWER
+	esp_wifi_start();
+
+	return true;
 }
 
-boolean
-checkWifiStatus(boolean initialConnect)
+void
+getWifiChanInfo (char *chanInfo, size_t len)
+{
+	if (wifiConnected) {
+		wifi_ap_record_t apInfo;
+		uint8_t staProtocol;
+		esp_wifi_sta_get_ap_info(&apInfo);
+		esp_wifi_get_protocol(WIFI_IF_STA, &staProtocol);
+		snprintf(chanInfo, len, "%d (%s%s%s%s)", apInfo.primary,
+			 (staProtocol & WIFI_PROTOCOL_11B) && apInfo.phy_11b ? "B" : "",
+			 (staProtocol & WIFI_PROTOCOL_11G) && apInfo.phy_11g ? "G" : "",
+			 (staProtocol & WIFI_PROTOCOL_11N) && apInfo.phy_11n ? "N" : "",
+			 (staProtocol & WIFI_PROTOCOL_11AX) && apInfo.phy_11ax ? "AX" : "");
+	} else {
+		snprintf(chanInfo, len, "n/a");
+	}
+}
+
+int
+getWifiRSSI (void)
+{
+	int rssi;
+
+	if (wifiConnected) {
+		esp_wifi_sta_get_rssi(&rssi);
+	} else {
+		rssi = 0;
+	}
+	return rssi;
+}
+
+void
+getWifiBSSID (byte *bssid)
+{
+	wifi_ap_record_t apInfo;
+	if (wifiConnected && (esp_wifi_sta_get_ap_info(&apInfo) == ESP_OK)) {
+		memcpy(bssid, apInfo.bssid, 6);
+	} else {
+		memset(bssid, 0, 6);
+	}
+}
+
+bool
+checkWifiStatus(bool initialConnect)
 {
 	static unsigned long lastWifiTry = 0;
-	static uint8_t previousWifiStatus = WL_DISCONNECTED;
-	uint8_t status;
+	static bool previousConnected = false;
+	static bool lastSetupSucceeded = false;
+	bool connected;
+	static esp_netif_t *netifSta = NULL, *netifAp = NULL;
 
 	if (initialConnect) {
 #ifdef DEBUG_OVER_SERIAL
 		Serial.printf("Connecting to %s\n", myPodNum == 1 ? config.wifiSSID.c_str() : PRIV_WIFI_SSID);
 #endif // DEBUG_OVER_SERIAL
-		setupWifi(/*wifiTries*/);
-		status = WiFi.status();
-		lastWifiTry = millis();
+		lastSetupSucceeded = setupWifi(&netifSta, &netifAp);
+		connected = wifiConnected;
+		wifiTries = 0;
+		checkTimer(&lastWifiTry, 0);  // Restart timer now.
 	} else {
-		status = WiFi.status();
-		if (status != WL_CONNECTED) {
-			if (previousWifiStatus == WL_CONNECTED) {
+		connected = wifiConnected;
+		if (connected) {
+			wifiTries = 0;
+			checkTimer(&lastWifiTry, 0);  // Restart timer now.
+		} else {
+			if (previousConnected) {
 				if (myPodNum != 1) {
 					udp.clear();
 					udp.stop();
@@ -1498,23 +1711,38 @@ checkWifiStatus(boolean initialConnect)
 					}
 				}
 			}
-			if (checkTimer(&lastWifiTry, WIFI_RECONNECT_INTERVAL)) {
+			if (checkTimer(&lastWifiTry, INTERVAL_TEN_SECONDS)) {
+				int triesToReset, triesToRestart;
+
+				if (lastSetupSucceeded) {
+					wifiTries++;
+				} else {
+					wifiTries = 0; // ensure we call setupWifi() below
+				}
 #ifdef DEBUG_OVER_SERIAL
-				Serial.printf("Reconnect to %s\n", myPodNum == 1 ? config.wifiSSID.c_str() : PRIV_WIFI_SSID);
+				Serial.printf("Reconnect to %s (%d)\n", myPodNum == 1 ? config.wifiSSID.c_str() : PRIV_WIFI_SSID, wifiTries);
 #endif // DEBUG_OVER_SERIAL
-//				WiFi.disconnect();
-//				delay(100);
-//				WiFi.reconnect();
-				wifiTries++;
+				if (myPodNum == 1) {
+					triesToReset = 30;	// 30 * 10s = 5 minutes
+					triesToRestart = 6;	// 6 * 10s = 1 minute
+				} else {
+					triesToReset = 30;	// 30 * 10s = 5 minutes
+					triesToRestart = 6;	// 6 * 10s = 1 minute
+				}
+				if ((wifiTries % triesToReset) == 0) {
+					lastSetupSucceeded = setupWifi(&netifSta, &netifAp);
+				} else if ((wifiTries % triesToRestart) == 0) {
+					MY_ERROR_CHECK(esp_wifi_stop());
+					delay(50);
+					MY_ERROR_CHECK(esp_wifi_start());
+				} else {
+					MY_ERROR_CHECK(esp_wifi_connect());
+				}
 			}
 		}
 	}
 
-	if (status == WL_CONNECTED) {
-		wifiTries = 0;
-		lastWifiTry = millis();
-	}
-	if ((status == WL_CONNECTED) && (previousWifiStatus != WL_CONNECTED)) {
+	if (connected && !previousConnected) {
 		IPAddress privIP(192, 168, PRIV_WIFI_SUBNET, myPodNum);
 #ifdef DEBUG_WIFI
 		wifiReconnects++;
@@ -1526,7 +1754,6 @@ checkWifiStatus(boolean initialConnect)
 				initMqtt();
 			}
 		} else {
-// DAVE - can any of these block?
 			udp.begin(privIP, PRIV_UDP_PORT);
 			otaServer = new WebServer(privIP, 80);
 			ElegantOTA.begin(otaServer);    // Start ElegantOTA
@@ -1534,20 +1761,39 @@ checkWifiStatus(boolean initialConnect)
 		}
 		wifiRestarted = true;
 #ifdef DEBUG_OVER_SERIAL
-		Serial.printf("WiFi IP is %s (%s)\n", WiFi.localIP().toString().c_str(), WiFi.SSID().c_str());
-		byte *bssid = WiFi.BSSID();
-		Serial.printf("WiFi BSSID is %02X:%02X:%02X:%02X:%02X:%02X\n", bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
-		Serial.printf("WiFi RSSI: %hhd\n", WiFi.RSSI());
-		Serial.printf("WiFi channel: %ld\n", WiFi.channel());
-		if (myPodNum == 1) {
-			Serial.printf("softAP IP address: %s : %s (%s)\n", WiFi.softAPIP().toString().c_str(),
-				      WiFi.softAPSubnetMask().toString().c_str(), WiFi.softAPSSID().c_str());
+		{
+			char chanInfo[12];
+			wifi_ap_record_t apInfo;
+			MY_ERROR_CHECK(esp_wifi_sta_get_ap_info(&apInfo));
+			getWifiChanInfo(&chanInfo[0], sizeof(chanInfo));
+			if (netifSta) {
+				esp_netif_ip_info_t ipInfo;
+				esp_netif_get_ip_info(netifSta, &ipInfo);
+				Serial.printf("WiFi IP is " IPSTR " (%s)\n", IP2STR(&ipInfo.ip), apInfo.ssid);
+			} else {
+				Serial.println("WiFi IP unavailable.");
+			}
+			Serial.printf("WiFi BSSID is " MACSTR "\n", MAC2STR(apInfo.bssid));
+			Serial.printf("WiFi RSSI: %hhd\n", apInfo.rssi);
+			Serial.printf("WiFi channel: %s\n", chanInfo);
+			if (myPodNum == 1) {
+				if (netifAp) {
+					esp_netif_ip_info_t ipInfo;
+					esp_netif_get_ip_info(netifAp, &ipInfo);
+					wifi_config_t apConf;
+					MY_ERROR_CHECK(esp_wifi_get_config(WIFI_IF_STA, &apConf));
+					Serial.printf("softAP IP address: " IPSTR " : " IPSTR " (%s)\n", IP2STR(&ipInfo.ip),
+						      IP2STR(&ipInfo.netmask), apConf.ap.ssid);
+				} else {
+					Serial.println("softAP IP unavailable.");
+				}
+			}
 		}
 #endif // DEBUG_OVER_SERIAL
 	}
-	previousWifiStatus = status;
+	previousConnected = connected;
 
-	return status == WL_CONNECTED;
+	return connected;
 }
 
 /*
@@ -1601,7 +1847,7 @@ void
 updateOLED(bool justStatus, const char* line2, const char* line3, const char* line4)
 {
 	static unsigned long updateStatusBar = 0;
-	int8_t rssi;
+	int rssi;
 
 	_display.clearDisplay();
 	_display.setTextSize(1);
@@ -1616,15 +1862,16 @@ updateOLED(bool justStatus, const char* line2, const char* line3, const char* li
 		_oledOperatingIndicator = (_oledOperatingIndicator == '*') ? ' ' : '*';
 	}
 
-	rssi = WiFi.RSSI();
+	rssi = getWifiRSSI();
+
 	// There's 20 characters we can play with, width wise.
 	{
 		char wifiStatus, mqttStatus;
 
 		wifiStatus = mqttStatus = ' ';
-		wifiStatus = WiFi.status() == WL_CONNECTED ? 'W' : ' ';
+		wifiStatus = wifiConnected ? 'W' : ' ';
 		mqttStatus = mqttClient.connected() ? 'M' : ' ';
-		snprintf(line1, sizeof(line1), "Pod%d %c%c%c         %3hhd",
+		snprintf(line1, sizeof(line1), "Pod%d %c%c%c         %3d",
 			 myPodNum, _oledOperatingIndicator, wifiStatus, mqttStatus, rssi);
 	}
 	_display.println(line1);
@@ -1736,9 +1983,11 @@ updateDisplayInfo()
 			}
 		}
 		if (myPodNum == 1) {
-			activeWiFi = WiFi.softAPgetStationNum();
+			wifi_sta_list_t staList;
+			esp_wifi_ap_get_sta_list(&staList);
+			activeWiFi = staList.num;
 		} else {
-			activeWiFi = WiFi.status() == WL_CONNECTED ? 1 : 0;
+			activeWiFi = wifiConnected ? 1 : 0;
 		}
 		snprintf(line2, sizeof(line2), "%s : %hhd/%hhd/%hhd : %s", mode, activeSys, activePeers, activeWiFi,
 			 pods[0].forceMode ? "FORCE" : "NORM"); // 4 + 3 + 5 + 3 + 5
@@ -1809,13 +2058,17 @@ updateDisplayInfo()
 #endif // DEBUG_FREEMEM
 #ifdef DEBUG_WIFI
 	} else if (dbgIdx < 3) {
-		snprintf(line4, sizeof(line4), "WiFi recon: %lu", wifiReconnects);
+		snprintf(line4, sizeof(line4), "WiFi recon: %lu/%u/%d", wifiReconnects, wifiConnectedCnt, wifiTries);
 		dbgIdx = 3;
 	} else if (dbgIdx < 4) {
-		snprintf(line4, sizeof(line4), "WiFi TX: %0.01fdBm", (int)WiFi.getTxPower() / 4.0f);
+		int8_t power;
+		esp_wifi_get_max_tx_power(&power);
+		snprintf(line4, sizeof(line4), "WiFi TX: %0.01fdBm", (float)power / 4.0f);
 		dbgIdx = 4;
 	} else if (dbgIdx < 5) {
-		snprintf(line4, sizeof(line4), "WiFi tries: %d", wifiTries);
+		char chanInfo[12];
+		getWifiChanInfo(&chanInfo[0], sizeof(chanInfo));
+		snprintf(line4, sizeof(line4), "WiFi CH: %s", chanInfo);
 		dbgIdx = 5;
 #endif // DEBUG_WIFI
 #ifdef DEBUG_MQTT
@@ -1842,11 +2095,11 @@ updateDisplayInfo()
 	} else if (dbgIdx < 21) {
 		snprintf(line4, sizeof(line4), "Bat: %d%%  %0.02fV", myPod->batteryPct, myPod->batteryVolts);
 		dbgIdx = 21;
-#ifdef DAVE_EXT_ANT
+#ifdef DEBUG_WIFI
 	} else if (dbgIdx < 22) {
 		snprintf(line4, sizeof(line4), "Ext Ant: %s", config.extAntenna ? "On" : "Off");
 		dbgIdx = 22;
-#endif // DAVE_EXT_ANT
+#endif // DEBUG_WIFI
 #ifdef DEBUG_SENSORS
 	} else if (dbgIdx < 23) {
 		snprintf(line4, sizeof(line4), "%s/%d : %s/%d",
@@ -2069,16 +2322,21 @@ readEntity(mqttState *singleEntity, char *value, int podNum)
 		break;
 #ifdef DEBUG_WIFI_DAVE_HACK
 	case mqttEntityId::entityRSSI:
-		sprintf(value, "%d", WiFi.RSSI());
+		sprintf(value, "%d", getWifiRSSI());
 		break;
 	case mqttEntityId::entityBSSID:
 		{
-			byte *bssid = WiFi.BSSID();
-			sprintf(value, "%02X:%02X:%02X:%02X:%02X:%02X", bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
+			byte bssid[6];
+			getWifiBSSID(&bssid[0]);
+			sprintf(value, MACSTR, MAC2STR(bssid));
 		}
 		break;
 	case mqttEntityId::entityTxPower:
-		sprintf(value, "%0.1f", (float)WiFi.getTxPower() / 4.0);
+		{
+			int8_t power;
+			esp_wifi_get_max_tx_power(&power);
+			sprintf(value, "%0.1f", (float)Power / 4.0);
+		}
 		break;
 	case mqttEntityId::entityWifiRecon:
 		sprintf(value, "%lu", wifiReconnects);
