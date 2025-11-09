@@ -39,13 +39,13 @@
 void setButtonLEDs(int freq = 0);
 
 // Device parameters
-char _version[VERSION_STR_LEN] = "v2.73";
+char _version[VERSION_STR_LEN] = "v2.74";
 char myUniqueId[17];
 char statusTopic[128];
 
 int myPodNum = -1;
-podState *myPod;
-podState pods[NUM_PODS + 1];  // 0 is (virtual) system
+volatile podState *myPod;
+volatile podState pods[NUM_PODS + 1];  // 0 is (virtual) system
 
 // WiFi parameters
 volatile bool wifiConnected = false;
@@ -322,7 +322,7 @@ void setup()
 
 	// Initialize data.
 	// myPodNum was set above.
-	strlcpy(myPod->version, &_version[1], sizeof(myPod->version)); // skip initial 'v'
+	strlcpy((char *)myPod->version, &_version[1], sizeof(myPod->version)); // skip initial 'v'
 	readBattery();
 	readPodState();
 	pods[0].mode = modeUp;		// System mode
@@ -985,7 +985,7 @@ getRemotePodStatus (int podNum, char *buf)
 			break;
 		}
 	}
-	parseStr(buf, "VV=", pods[podNum].version, sizeof(pods[podNum].version));
+	parseStr(buf, "VV=", (char *)pods[podNum].version, sizeof(pods[podNum].version));
 	pods[podNum].uptime = parseInt(buf, "UT=");
 	if (goodUpdate) {
 		pods[podNum].lastUpdate = getUptimeSeconds();
@@ -1383,8 +1383,8 @@ readBattery(void)
 uint32_t
 getUptimeSeconds(void)
 {
-	static uint32_t uptimeSeconds = 0;
-	static uint32_t uptimeWrapSeconds = 0;
+	volatile static uint32_t uptimeSeconds = 0;
+	volatile static uint32_t uptimeWrapSeconds = 0;
 	uint32_t nowSeconds = millis() / 1000;
 
 	if (nowSeconds < uptimeSeconds) {
