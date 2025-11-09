@@ -24,8 +24,8 @@ Author:		David Carrel
 
 // How long to wait after detecting up/down before
 // stopping the raise/lower action
-#define ALMOST_DOWN_DELAY 2000  // 2 seconds
-#define ALMOST_UP_DELAY   8000  // 8 seconds
+#define ALMOST_DOWN_DELAY 1000  // 1 seconds
+#define ALMOST_UP_DELAY   10000  // 10 seconds
 
 /*************************************************
  * XIAO ESP32C6 Pin map

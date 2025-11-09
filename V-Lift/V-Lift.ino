@@ -6,7 +6,7 @@
 
 // DAVE -  todo --
 // ADD duty-cycle
-// handle top sensor going wet w/o bottom - longer delay after blowing?
+// handle top sensor going wet w/o bottom
 // Add back web config
 //      - try reducing TX power - value is (dBm * 4) so 17dBm == 68
 //#define DAVE_TEST_POWER 68
@@ -1253,7 +1253,7 @@ readPodState(void)
 		} else if ((myPod->position == positionAlmostDown) &&
 			   ((almostDownTime + ALMOST_DOWN_DELAY) > now)) {
 			// Do nothing until delay passes
-		} else {
+		} else /* Up || AlmostUp || Down || (AlmostDown && delay) */ {
 			newPosition = positionDown;
 			almostDownTime = 0;
 		}
@@ -1263,13 +1263,13 @@ readPodState(void)
 		almostDownTime = 0;
 		almostUpTime = 0;
 	} else /* neither wet */ {
-		if (myPod->position == positionMiddle) {
+		if ((myPod->position == positionMiddle) || (myPod->position == positionDown) || (myPod->position == positionAlmostDown)) {
 			newPosition = positionAlmostUp;
 			almostUpTime = now;
 		} else if ((myPod->position == positionAlmostUp) &&
 			   ((almostUpTime + ALMOST_UP_DELAY) > now)) {
 			// Do nothing until delay passes
-		} else {
+		} else /* Up || (AlmostUp && delay) */ {
 			newPosition = positionUp;
 			almostUpTime = 0;
 		}
