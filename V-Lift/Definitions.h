@@ -300,5 +300,12 @@ struct Config {
 #endif // MP_XIAO_ESP32C6                                                                                                                                                               
 #define PREF_NAME_POD_NUM	"Pod_Number"
 
+enum myWifiState {
+	stopped,
+	configuring,
+	disconnected,
+	started,
+	gotIp
+};
 
 #endif // ! _Definitions_h
