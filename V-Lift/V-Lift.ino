@@ -42,7 +42,7 @@
 void setButtonLEDs(int freq = 0);
 
 // Device parameters
-char _version[VERSION_STR_LEN] = "v2.75";
+char _version[VERSION_STR_LEN] = "v2.76";
 char myUniqueId[17];
 char statusTopic[128];
 
@@ -68,7 +68,7 @@ const char* rootCA = ROOT_CA;
 // MQTT parameters
 PsychicMqttClient mqttClient;
 typedef struct publish {
-	volatile uint16_t packetId;
+	volatile int packetId;
 	char topic[128];
 	char payload[MAX_MQTT_BUFFER_SIZE];
 } publishEntry;
@@ -165,7 +165,7 @@ static struct mqttState _mqttPodEntities[] =
 #define UPDATE_STATUS_BAR_INTERVAL (INTERVAL_ONE_SECOND / 2)
 #define STATUS_INTERVAL INTERVAL_TEN_SECONDS
 #define DATA_INTERVAL_URGENT INTERVAL_FIVE_SECONDS
-#define DATA_INTERVAL_NORMAL (INTERVAL_ONE_MINUTE * 2)
+#define DATA_INTERVAL_NORMAL INTERVAL_ONE_MINUTE
 #define HA_DATA_INTERVAL_INITIAL (INTERVAL_TEN_SECONDS * 2)
 #define HA_DATA_INTERVAL_NORMAL INTERVAL_FIVE_MINUTE
 #define POD2POD_DATA_INTERVAL_URGENT INTERVAL_ONE_SECOND
@@ -264,6 +264,7 @@ void setup()
 	wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
 	cfg.nvs_enable = false;
 	MY_ERROR_CHECK(esp_wifi_init(&cfg));
+	MY_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
 
 	// Set WiFi mode and our unique identity.
 	if (myPodNum == 1) {
@@ -1431,7 +1432,9 @@ static void wifiEventHandler(void *arg, esp_event_base_t eventBase,
 #endif // DEBUG_OVER_SERIAL && DEBUG_WIFI
 			break;
 		case WIFI_EVENT_STA_START:
-			esp_wifi_connect();
+			if (wifiState == myWifiState::started) {
+				esp_wifi_connect();
+			}
 #if defined(DEBUG_OVER_SERIAL) && defined(DEBUG_WIFI)
 			Serial.println("Station WiFi started");
 #endif // DEBUG_OVER_SERIAL && DEBUG_WIFI
@@ -1504,7 +1507,7 @@ wifiDoScans (uint8_t *chanPtr, uint8_t *bssid)
 		if (ret2 == ESP_OK) {
 			goodScans++;
 #if defined(DEBUG_OVER_SERIAL) && defined(DEBUG_WIFI)
-			Serial.printf("Scan %hhu/ssid returned %d/%d [" MACSTR "] (%lu msec) RSSI=%d -", chan, ret1, ret2,
+			Serial.printf("Scan %hhu returned %d/%d [" MACSTR "] (%lu msec) RSSI=%d -", chan, ret1, ret2,
 				      MAC2STR(scanRecord.bssid), millis() - before, scanRecord.rssi);
 			if (scanRecord.phy_11b) Serial.print(" B");
 			if (scanRecord.phy_11g) Serial.print(" G");
@@ -1512,7 +1515,7 @@ wifiDoScans (uint8_t *chanPtr, uint8_t *bssid)
 			if (scanRecord.phy_11ax) Serial.print(" AX");
 			Serial.println(".");
 		} else {
-			Serial.println("Scan record unavailable.");
+			Serial.printf("Scan %hhu record unavailable.\n", chan);
 #endif // DEBUG_OVER_SERIAL && DEBUG_WIFI
 		}
 		if ((ret2 == ESP_OK) && (scanRecord.rssi > bestRSSI) && (scanRecord.rssi < -10)) {
@@ -1695,30 +1698,31 @@ checkWifiStatus (void)
 		wifiState = myWifiState::configuring;
 		lastWifiTry = 0; // No delay for fallthru below
 		scanTries = 0;
-		wifiTries = -1;
+		wifiTries = -1;  // Will increment to zero after fallthru
 		/* FALLTHRU */
 	case myWifiState::configuring:
 		wifiTries++;
 		if (myPodNum == 1) {
-			uint8_t chan, bssid[6];
 			if (checkTimer(&lastWifiTry, INTERVAL_TEN_SECONDS)) {
 #if defined(DEBUG_OVER_SERIAL) && defined(DEBUG_WIFI)
 				Serial.println("Configuring WiFi");
 #endif // DEBUG_OVER_SERIAL && DEBUG_WIFI
-				int scans = wifiDoScans(&chan, &bssid[0]);
+				uint8_t chan, bssid[6];
+				int goodScans = wifiDoScans(&chan, &bssid[0]);
 				scanTries++;
 				if (scanTries < 4) {
-					if (scans < 3) {
+					if (goodScans < 3) {
 						break; // Try scans again later
 					}
 				} else if (scanTries < 7) {
-					if (scans < 2) {
+					if (goodScans < 2) {
 						break; // Try scans again later
 					}
-				} else if (scans == 0) {
+				} else if (goodScans == 0) {
 					break; // Try scans again later
 				}
 				MY_ERROR_CHECK(esp_wifi_stop());
+				delay(100);
 				netifAp = esp_netif_create_default_wifi_ap();
 				netifSta = esp_netif_create_default_wifi_sta();
 				wifiSetupApSta(chan, bssid, netifAp, netifSta);
@@ -1729,10 +1733,10 @@ checkWifiStatus (void)
 			netifSta = esp_netif_create_default_wifi_sta();
 			wifiSetupSta(netifSta);
 		}
-		MY_ERROR_CHECK(esp_wifi_start());
 		startedCnt = 0;
 		wifiState = myWifiState::started;
 		lastWifiTry = 0;  // No delay next time in this loop
+		MY_ERROR_CHECK(esp_wifi_start());
 		break;
 	case myWifiState::disconnected:
 		startedCnt = - 1; // So reconn will fire immediately
@@ -2179,6 +2183,10 @@ initMqtt(void)
 	lwt += " }";
 	mqttClient.setWill(statusTopic, 1, true, lwt.c_str());
 	mqttClient.setCleanSession(true);
+	{
+		esp_mqtt_client_config_t *mqttCfg = mqttClient.getMqttConfig();
+		mqttCfg->network.timeout_ms = 3000; // 3s (default is 10s)
+	}
 
 	mqttClient.onConnect(onMqttConnect);
 	mqttClient.onPublish(onMqttPublish);
@@ -2203,11 +2211,13 @@ initMqtt(void)
 }
 
 void
-onMqttPublish(uint16_t packetId)
+onMqttPublish(int packetId)
 {
-	for (int i = 0; i < MQTT_NUM_PUBLISH_PKTS; i++) {
-		if (mqttPublishArray[i].packetId == packetId) {
-			clearPublishEntry(&mqttPublishArray[i]);
+	if (packetId != 0) {
+		for (int i = 0; i < MQTT_NUM_PUBLISH_PKTS; i++) {
+			if (mqttPublishArray[i].packetId == packetId) {
+				mqttPublishArray[i].packetId = 0;
+			}
 		}
 	}
 #ifdef DEBUG_MQTT
@@ -3001,13 +3011,7 @@ sendMqtt(publishEntry *publish, bool retain)
 {
 	bool ret;
 	// Attempt a send
-	int packetId = mqttClient.publish(publish->topic, MQTT_PUBLISH_QOS, retain, publish->payload, strlen(publish->payload),
-#if MQTT_PUBLISH_QOS == 0
-					  false // NOT async
-#else
-					  true  // async
-#endif
-		);
+	int packetId = mqttClient.publish(publish->topic, MQTT_PUBLISH_QOS, retain, publish->payload, strlen(publish->payload), true);
 	if (packetId == -1) {
 		ret = false;
 #ifdef DEBUG_OVER_SERIAL
