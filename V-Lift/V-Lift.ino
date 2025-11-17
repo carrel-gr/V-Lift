@@ -5,14 +5,16 @@
  */
 
 // DAVE -  todo --
+// make mqtt disconnect/reconnect
+// restart wifi if gotIp and mqtt is disconnected for too long
+// pressing button a 2nd time doesn't stop.
 // ADD duty-cycle
 // handle top sensor going wet w/o bottom
 // Add back web config
-//      - try reducing TX power - value is (dBm * 4) so 17dBm == 68
-//#define DAVE_TEST_POWER 68
 
-//#define DAVE_TEST_SSID "SFYCMEMBERS"
-//#define DAVE_TEST_PASS "SFYC1869"
+#define WIFI_TEST_POWER
+
+#define WIFI_TEST_INACTIVE_TIME 15
 
 #define REMOVE_WEB_CONFIG
 
@@ -42,7 +44,7 @@
 void setButtonLEDs(int freq = 0);
 
 // Device parameters
-char _version[VERSION_STR_LEN] = "v2.76";
+char _version[VERSION_STR_LEN] = "v2.78";
 char myUniqueId[17];
 char statusTopic[128];
 
@@ -52,13 +54,11 @@ volatile podState pods[NUM_PODS + 1];  // 0 is (virtual) system
 
 // WiFi parameters
 volatile enum myWifiState wifiState = myWifiState::stopped;
-int wifiTries = 0;
-#ifdef DAVE_WIFI_POWER
-wifi_power_t wifiPower = WIFI_POWER_11dBm; // Will bump to max before setting
-#endif // DAVE_WIFI_POWER
+volatile bool wifiRestarted = false;
 #ifdef DEBUG_WIFI
-volatile uint wifiConnectedCnt = 0;
-uint32_t wifiGotIpCnt = 0;
+uint16_t wifiStoppedCnt = 0;
+volatile uint16_t wifiConnectedCnt = 0;
+uint16_t wifiGotIpCnt = 0;
 #endif // DEBUG_WIFI
 
 #ifdef USE_SSL
@@ -68,12 +68,10 @@ const char* rootCA = ROOT_CA;
 // MQTT parameters
 PsychicMqttClient mqttClient;
 typedef struct publish {
-	volatile int packetId;
 	char topic[128];
 	char payload[MAX_MQTT_BUFFER_SIZE];
-} publishEntry;
-publishEntry *mqttPublishArray = NULL;
-#define MQTT_NUM_PUBLISH_PKTS 16
+} publishEntry_t;
+publishEntry_t globalPublishEntry;
 #ifdef DEBUG_MQTT
 uint32_t mqttRcvCallbacks = 0;
 uint32_t mqttUnkCallbacks = 0;
@@ -82,11 +80,9 @@ uint32_t mqttPubCallbacks = 0;
 uint32_t mqttConnects = 0;
 uint32_t mqttPublishSuccess = 0;
 uint32_t mqttPublishFail = 0;
-uint32_t mqttPublishNoMem = 0;
 #endif // DEBUG_MQTT
 volatile bool mqttStartupMode = true;
 volatile bool mqttCallbackRcvd = false;
-volatile bool wifiRestarted = false;
 
 // OTA setup
 WebServer *otaServer = NULL;
@@ -126,9 +122,6 @@ Config config;
 static struct mqttState _mqttSysEntities[] =
 {
 	// Entity,                                "Name",           Subscribe, Retain, doEntity, HA Class
-#ifdef DEBUG_FREEMEM
-	{ mqttEntityId::entityFreemem,            "freemem",            false, false,  true,     homeAssistantClass::haClassInfo },
-#endif
 #ifdef DEBUG_WIFI_DAVE_HACK
 	{ mqttEntityId::entityRSSI,               "RSSI",               false, false,  true,     homeAssistantClass::haClassInfo },
 	{ mqttEntityId::entityBSSID,              "BSSID",              false, false,  true,     homeAssistantClass::haClassInfo },
@@ -627,7 +620,9 @@ loop ()
 	}
 
 	// Handle OTA
-	if (otaServer != NULL) {
+	if ((otaServer != NULL) &&
+	    ((wifiState == myWifiState::gotIp) ||
+	     ((myPodNum == 1) && (wifiState == myWifiState::started)))) {
 		otaServer->handleClient();
 		ElegantOTA.loop();
 	}
@@ -696,13 +691,14 @@ loop ()
 	setButtonLEDs();
 
 	if (myPodNum == 1) {
-		if (checkTimer(&lastRunPodData, pod2podDataInterval)) {
+		if (((wifiState == myWifiState::started) || (wifiState == myWifiState::gotIp)) &&
+		    checkTimer(&lastRunPodData, pod2podDataInterval)) {
 			sendCommandsToRemotePods();
 			sendPodInfo();
 			pod2podDataInterval = POD2POD_DATA_INTERVAL_NORMAL;
 		}
 
-		if (mqttIsOn) {
+		if ((wifiState == myWifiState::gotIp) && mqttIsOn) {
 			sendStatus(&lastRunStatus);	// Send status/keepalive
 			sendHaData(&lastRunSendHaData, mqttStartupMode);
 			sendData(&lastRunSendData, mqttUrgent || mqttStartupMode);
@@ -710,7 +706,7 @@ loop ()
 			mqttStartupMode = false;
 		}
 	} else {
-		if (wifiIsOn && checkTimer(&lastRunPodData, pod2podDataInterval)) {
+		if ((wifiState == myWifiState::gotIp) && checkTimer(&lastRunPodData, pod2podDataInterval)) {
 			sendPodInfo();
 			remoteButtons = buttonState::nothingPressed; // consumed by sendPodinfo()
 			pod2podDataInterval = POD2POD_DATA_INTERVAL_NORMAL;
@@ -1492,11 +1488,11 @@ wifiDoScans (uint8_t *chanPtr, uint8_t *bssid)
 #if defined(DEBUG_OVER_SERIAL) && defined(DEBUG_WIFI)
 			before = millis();
 #endif // DEBUG_OVER_SERIAL && DEBUG_WIFI
-			ret1 = MY_ERROR_CHECK(esp_wifi_scan_start(scanCfg, true));
+			ret1 = esp_wifi_scan_start(scanCfg, true);
 			free(scanCfg);
 		}
 		if (ret1 == ESP_OK) {
-			ret2 = MY_ERROR_CHECK(esp_wifi_scan_get_ap_record(&scanRecord));
+			ret2 = esp_wifi_scan_get_ap_record(&scanRecord);
 		} else {
 #if defined(DEBUG_OVER_SERIAL) && defined(DEBUG_WIFI)
 			Serial.println("scan_start failed.");
@@ -1549,7 +1545,7 @@ wifiSetupApSta(uint8_t chan, uint8_t *bssid, esp_netif_t *netifAp, esp_netif_t *
 		wifiApConfig->ap.ssid_len = strlen(PRIV_WIFI_SSID);
 		wifiApConfig->ap.channel = chan;
 		wifiApConfig->ap.authmode = WIFI_AUTH_WPA2_PSK;
-		wifiApConfig->ap.max_connection = (NUM_PODS + 1);
+		wifiApConfig->ap.max_connection = (NUM_PODS * 2);
 		MY_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, wifiApConfig));
 		free(wifiApConfig);
 	}
@@ -1645,6 +1641,9 @@ checkWifiStatus (void)
 	static int scanTries = 0;
 	static int startedCnt = 0;
 	static bool udpIsOn = false;
+#ifdef WIFI_TEST_POWER
+	static uint8_t wifiPower = WIFI_POWER_8_5dBm;
+#endif // WIFI_TEST_POWER
 	unsigned int restartTime, reconnFreq;
 
 	// These are multiplied by 10 sec below when waiting in start mode.
@@ -1660,6 +1659,9 @@ checkWifiStatus (void)
 
 	switch (startingWifiState) {
 	case myWifiState::stopped:
+#ifdef DEBUG_WIFI
+		wifiStoppedCnt++;
+#endif // DEBUG_WIFI
 #ifdef DEBUG_OVER_SERIAL
 		Serial.printf("Connecting to %s\n", myPodNum == 1 ? config.wifiSSID.c_str() : PRIV_WIFI_SSID);
 #endif // DEBUG_OVER_SERIAL
@@ -1688,20 +1690,31 @@ checkWifiStatus (void)
 		}
 		MY_ERROR_CHECK(esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT20));
 		MY_ERROR_CHECK(esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B|WIFI_PROTOCOL_11G|WIFI_PROTOCOL_11N|WIFI_PROTOCOL_11AX));
-#ifdef DAVE_TEST_POWER
-		MY_ERROR_CHECK(esp_wifi_set_max_tx_power(DAVE_TEST_POWER));
-#endif // DAVE_TEST_POWER
 		delay(100);
+#ifdef WIFI_TEST_POWER
+		if (myPodNum == 1) {
+			if (wifiPower == WIFI_POWER_8_5dBm) {
+				wifiPower = WIFI_POWER_13dBm;
+			} else if (wifiPower == WIFI_POWER_13dBm) {
+				wifiPower = WIFI_POWER_21dBm;
+			} else {
+				wifiPower = WIFI_POWER_8_5dBm;
+			}
+		} else {
+			wifiPower = WIFI_POWER_8_5dBm;
+		}
+#endif // WIFI_TEST_POWER
 		if (myPodNum == 1) {
 			MY_ERROR_CHECK(esp_wifi_start());
+#ifdef WIFI_TEST_POWER
+			MY_ERROR_CHECK(esp_wifi_set_max_tx_power(wifiPower));
+#endif // WIFI_TEST_POWER
 		}
 		wifiState = myWifiState::configuring;
 		lastWifiTry = 0; // No delay for fallthru below
 		scanTries = 0;
-		wifiTries = -1;  // Will increment to zero after fallthru
 		/* FALLTHRU */
 	case myWifiState::configuring:
-		wifiTries++;
 		if (myPodNum == 1) {
 			if (checkTimer(&lastWifiTry, INTERVAL_TEN_SECONDS)) {
 #if defined(DEBUG_OVER_SERIAL) && defined(DEBUG_WIFI)
@@ -1737,6 +1750,12 @@ checkWifiStatus (void)
 		wifiState = myWifiState::started;
 		lastWifiTry = 0;  // No delay next time in this loop
 		MY_ERROR_CHECK(esp_wifi_start());
+#ifdef WIFI_TEST_POWER
+		MY_ERROR_CHECK(esp_wifi_set_max_tx_power(wifiPower));
+#endif // WIFI_TEST_POWER
+#ifdef WIFI_TEST_INACTIVE_TIME
+		esp_wifi_set_inactive_time(WIFI_IF_STA, WIFI_TEST_INACTIVE_TIME);
+#endif // WIFI_TEST_INACTIVE_TIME
 		break;
 	case myWifiState::disconnected:
 		startedCnt = - 1; // So reconn will fire immediately
@@ -1745,7 +1764,6 @@ checkWifiStatus (void)
 	case myWifiState::started:
 		// Should normally leave this state because eventHandler calls connect()
 		if (checkTimer(&lastWifiTry, INTERVAL_TEN_SECONDS)) {
-			wifiTries++;
 			startedCnt++;
 			if (startedCnt >= restartTime) {
 #if defined(DEBUG_OVER_SERIAL) && defined(DEBUG_WIFI)
@@ -1879,7 +1897,7 @@ void
 updateOLED(bool justStatus, const char* line2, const char* line3, const char* line4)
 {
 	static unsigned long updateStatusBar = 0;
-	int rssi;
+	static int rssi = 0;
 
 	_display.clearDisplay();
 	_display.setTextSize(1);
@@ -1892,9 +1910,8 @@ updateOLED(bool justStatus, const char* line2, const char* line3, const char* li
 	if (checkTimer(&updateStatusBar, UPDATE_STATUS_BAR_INTERVAL)) {
 		// Simply swap between space and asterisk every time we come here to give some indication of activity
 		_oledOperatingIndicator = (_oledOperatingIndicator == '*') ? ' ' : '*';
+		rssi = getWifiRSSI();
 	}
-
-	rssi = getWifiRSSI();
 
 	// There's 20 characters we can play with, width wise.
 	{
@@ -2090,7 +2107,7 @@ updateDisplayInfo()
 #endif // DEBUG_FREEMEM
 #ifdef DEBUG_WIFI
 	} else if (dbgIdx < 3) {
-		snprintf(line4, sizeof(line4), "WiFi recon: %lu/%u/%d", wifiGotIpCnt, wifiConnectedCnt, wifiTries);
+		snprintf(line4, sizeof(line4), "WiFi recon: %hu/%hu/%hu", wifiStoppedCnt, wifiConnectedCnt, wifiGotIpCnt);
 		dbgIdx = 3;
 	} else if (dbgIdx < 4) {
 		int8_t power;
@@ -2111,7 +2128,7 @@ updateDisplayInfo()
 		snprintf(line4, sizeof(line4), "MQTT conn: %lu", mqttConnects);
 		dbgIdx = 9;
 	} else if ((dbgIdx < 10) && (myPodNum == 1)) {
-		snprintf(line4, sizeof(line4), "MQTT pub: %lu/%lu/%lu", mqttPublishSuccess, mqttPublishFail, mqttPublishNoMem);
+		snprintf(line4, sizeof(line4), "MQTT pub: %lu/%lu", mqttPublishSuccess, mqttPublishFail);
 		dbgIdx = 10;
 #endif // DEBUG_MQTT
 #ifdef DEBUG_UPTIME
@@ -2193,19 +2210,6 @@ initMqtt(void)
 	// And any messages we are subscribed to will be pushed to the mqttCallback function for processing
 	mqttClient.onMessage(mqttCallback);
 
-	mqttPublishArray = new publishEntry[MQTT_NUM_PUBLISH_PKTS];
-	if (mqttPublishArray == NULL) {
-#ifdef DEBUG_OVER_SERIAL
-		Serial.println("Failed to allocate publish array!!");
-#endif // DEBUG_OVER_SERIAL
-		delay(1000);
-		ESP.restart();
-	} else {
-		for (int i = 0; i < MQTT_NUM_PUBLISH_PKTS; i++) {
-			clearPublishEntry(&mqttPublishArray[i]);
-		}
-	}
-
 	// Connect to MQTT
 	mqttClient.connect();
 }
@@ -2213,13 +2217,6 @@ initMqtt(void)
 void
 onMqttPublish(int packetId)
 {
-	if (packetId != 0) {
-		for (int i = 0; i < MQTT_NUM_PUBLISH_PKTS; i++) {
-			if (mqttPublishArray[i].packetId == packetId) {
-				mqttPublishArray[i].packetId = 0;
-			}
-		}
-	}
 #ifdef DEBUG_MQTT
 	mqttPubCallbacks++;
 #endif // DEBUG_MQTT
@@ -2347,11 +2344,6 @@ readEntity(mqttState *singleEntity, char *value, int podNum)
 	case mqttEntityId::entityPodBotSensor:
 		sprintf(value, "%s", pods[podNum].botSensorWet ? "Wet" : "Dry");
 		break;
-#ifdef DEBUG_FREEMEM
-	case mqttEntityId::entityFreemem:
-		sprintf(value, "%lu", freeMemory());
-		break;
-#endif // DEBUG_FREEMEM
 	case mqttEntityId::entityUptime:
 		sprintf(value, "%ld", pods[podNum].uptime);
 		break;
@@ -2373,7 +2365,7 @@ readEntity(mqttState *singleEntity, char *value, int podNum)
 		{
 			int8_t power;
 			esp_wifi_get_max_tx_power(&power);
-			sprintf(value, "%0.1f", (float)Power / 4.0);
+			sprintf(value, "%0.1f", (float)power / 4.0);
 		}
 		break;
 	case mqttEntityId::entityWifiRecon:
@@ -2393,7 +2385,7 @@ readEntity(mqttState *singleEntity, char *value, int podNum)
  * Query the handled entity in the usual way, and add the cleansed output to the buffer
  */
 boolean
-addState(publishEntry *publish, mqttState *singleEntity, int podNum)
+addState(publishEntry_t *publish, mqttState *singleEntity, int podNum)
 {
 	char response[MAX_FORMATTED_DATA_VALUE_LENGTH];
 	boolean result;
@@ -2407,7 +2399,7 @@ addState(publishEntry *publish, mqttState *singleEntity, int podNum)
 }
 
 boolean
-addPodState(publishEntry *publish, int podNum)
+addPodState(publishEntry_t *publish, int podNum)
 {
 	char response[MAX_FORMATTED_DATA_VALUE_LENGTH];
 	boolean result;
@@ -2434,17 +2426,13 @@ void
 sendStatus(unsigned long *lastRun)
 {
 	char stateAddition[256] = "";
-	publishEntry *publish;
+	publishEntry_t *publish = &globalPublishEntry;
 
 	if (!checkTimer(lastRun, STATUS_INTERVAL)) {
 		return;
 	}
 
-	publish = findFreePublish();
-	if (publish == NULL) {
-		*lastRun = 0;
-		return;
-	}
+	clearPublishEntry(publish);
 
 	strlcat(publish->topic, statusTopic, sizeof(publish->topic));
 
@@ -2455,6 +2443,24 @@ sendStatus(unsigned long *lastRun)
 			 POD_DATA_IS_FRESH(podNum) ? "online" : "offline");
 		strlcat(stateAddition, moreState, sizeof(stateAddition));
 	}
+#ifdef DEBUG_WIFI
+	{
+		char moreState[64];
+		int8_t power;
+		char chanInfo[12];
+		getWifiChanInfo(&chanInfo[0], sizeof(chanInfo));
+		esp_wifi_get_max_tx_power(&power);
+		snprintf(moreState, sizeof(moreState), ", \"wifi\": \"%s %0.01fdBm %hu/%hu/%hu\"", chanInfo, (float)power / 4.0f, wifiStoppedCnt, wifiConnectedCnt, wifiGotIpCnt);
+		strlcat(stateAddition, moreState, sizeof(stateAddition));
+	}
+#endif // DEBUG_WIFI
+#ifdef DEBUG_FREEMEM
+	{
+		char moreState[32];
+		snprintf(moreState, sizeof(moreState), ", \"mem\": \"%lu\"", freeMemory());
+		strlcat(stateAddition, moreState, sizeof(stateAddition));
+	}
+#endif // DEBUG_FREEMEM
 	strlcat(stateAddition, " }", sizeof(stateAddition));
 	if (!addToPayload(publish, stateAddition)) {
 		*lastRun = 0;
@@ -2467,7 +2473,7 @@ sendStatus(unsigned long *lastRun)
 }
 
 boolean
-addConfig(publishEntry *publish, mqttState *singleEntity, int podNum)
+addConfig(publishEntry_t *publish, mqttState *singleEntity, int podNum)
 {
 	char stateAddition[1024] = "";
 	char prettyName[MAX_MQTT_NAME_LENGTH + 8], mqttName[MAX_MQTT_NAME_LENGTH + 8];
@@ -2618,11 +2624,6 @@ addConfig(publishEntry *publish, mqttState *singleEntity, int podNum)
 	case mqttEntityId::entityVersion:
 		sprintf(stateAddition, ", \"icon\": \"mdi:numeric\"");
 		break;
-#ifdef DEBUG_FREEMEM
-	case mqttEntityId::entityFreemem:
-		sprintf(stateAddition, ", \"icon\": \"mdi:memory\"");
-		break;
-#endif // DEBUG_FREEMEM
 	case mqttEntityId::entityUptime:
 	case mqttEntityId::entityPodBatPct:
 	case mqttEntityId::entityPodTopSensor:
@@ -2690,7 +2691,7 @@ addConfig(publishEntry *publish, mqttState *singleEntity, int podNum)
 
 
 boolean
-addToPayload(publishEntry *publish, const char* addition)
+addToPayload(publishEntry_t *publish, const char* addition)
 {
 	int targetRequestedSize = strlen(publish->payload) + strlen(addition);
 
@@ -2729,7 +2730,7 @@ sendData(unsigned long *lastRun, bool urgent)
 	for (int i = nextToSend; (i < totalEntities) && (curSent < MQTT_PUBLISH_BURST); i++, nextToSend++) {
 		int podNum, entityIdx;
 		struct mqttState *entity;
-		publishEntry *publish;
+		publishEntry_t *publish = &globalPublishEntry;
 
 		if (i < numSysEntities) {
 			podNum = 0;
@@ -2740,13 +2741,9 @@ sendData(unsigned long *lastRun, bool urgent)
 			entity = NULL;
 		}
 
-		publish = findFreePublish();
-		if (publish == NULL) {
-			break;
-		}
+		clearPublishEntry(publish);
 
 		if (!sendDataFromMqttState(publish, entity, false, podNum)) {
-			clearPublishEntry(publish);
 			break;
 		}
 
@@ -2780,7 +2777,7 @@ sendHaData(unsigned long *lastRun, bool startupMode)
 	for (int i = nextToSend; (i < totalEntities) && (curSent < MQTT_PUBLISH_BURST); i++, nextToSend++) {
 		int podNum, entityIdx;
 		struct mqttState *entity;
-		publishEntry *publish;
+		publishEntry_t *publish = &globalPublishEntry;
 
 		if (i < numSysEntities) {
 			podNum = 0;
@@ -2796,13 +2793,9 @@ sendHaData(unsigned long *lastRun, bool startupMode)
 			continue;
 		}
 
-		publish = findFreePublish();
-		if (publish == NULL) {
-			break;
-		}
+		clearPublishEntry(publish);
 
 		if (!sendDataFromMqttState(publish, entity, true, podNum)) {
-			clearPublishEntry(publish);
 			break;
 		}
 
@@ -2811,7 +2804,7 @@ sendHaData(unsigned long *lastRun, bool startupMode)
 }
 
 bool
-sendDataFromMqttState(publishEntry *publish, mqttState *singleEntity, bool doHomeAssistant, int podNum)
+sendDataFromMqttState(publishEntry_t *publish, mqttState *singleEntity, bool doHomeAssistant, int podNum)
 {
 	boolean result = false;
 	boolean retain;
@@ -3007,12 +3000,19 @@ mqttCallback(char *topic, char *message, int retain, int qos, bool dup)
  * Sends whatever is in the modular level payload to the specified topic.
  */
 bool
-sendMqtt(publishEntry *publish, bool retain)
+sendMqtt(publishEntry_t *publish, bool retain)
 {
 	bool ret;
-	// Attempt a send
-	int packetId = mqttClient.publish(publish->topic, MQTT_PUBLISH_QOS, retain, publish->payload, strlen(publish->payload), true);
-	if (packetId == -1) {
+	int packetId;
+
+	if (wifiState == myWifiState::gotIp) {
+		// Attempt a send
+		packetId = mqttClient.publish(publish->topic, MQTT_PUBLISH_QOS, retain, publish->payload, strlen(publish->payload), true);
+	} else {
+		packetId = -111;
+	}
+
+	if (packetId < 0) {
 		ret = false;
 #ifdef DEBUG_OVER_SERIAL
 		Serial.printf("MQTT publish failed to %s\n", publish->topic);
@@ -3023,7 +3023,6 @@ sendMqtt(publishEntry *publish, bool retain)
 #endif // DEBUG_MQTT
 	} else {
 		ret = true;
-		publish->packetId = packetId;
 #ifdef DEBUG_OVER_SERIAL
 //		Serial.printf("MQTT publish success (%d): %s\n", ret, publish->topic);
 //		Serial.println(publish->payload);
@@ -3039,32 +3038,9 @@ sendMqtt(publishEntry *publish, bool retain)
 /*
  * publishEntry functions
  */
-publishEntry *
-findFreePublish(void)
-{
-	static int last = 0;
-	int i = last;
-
-	do {
-		i++;
-		if (i >= MQTT_NUM_PUBLISH_PKTS) {
-			i = 0;
-		}
-		if (mqttPublishArray[i].packetId == 0) {
-			clearPublishEntry(&mqttPublishArray[i]);
-			last = i;
-			return &mqttPublishArray[i];
-		}
-	} while (i != last);
-
-	mqttPublishNoMem++;
-	return NULL;
-}
-
 void
-clearPublishEntry(publishEntry *publish)
+clearPublishEntry(publishEntry_t *publish)
 {
-	publish->packetId = 0;
 	publish->topic[0] = '\0';
 	publish->payload[0] = '\0';
 }

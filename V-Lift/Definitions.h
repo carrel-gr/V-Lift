@@ -177,9 +177,6 @@ Author:		David Carrel
 #define MQTT_SUB_HOMEASSISTANT "homeassistant/status"
 
 enum mqttEntityId {
-#ifdef DEBUG_FREEMEM
-	entityFreemem,
-#endif // DEBUG_FREEMEM
 #ifdef DEBUG_WIFI_DAVE_HACK
 	entityRSSI,
 	entityBSSID,
