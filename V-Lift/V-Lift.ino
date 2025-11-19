@@ -44,7 +44,7 @@
 void setButtonLEDs(int freq = 0);
 
 // Device parameters
-char _version[VERSION_STR_LEN] = "v2.78";
+char _version[VERSION_STR_LEN] = "v2.79";
 char myUniqueId[17];
 char statusTopic[128];
 
@@ -1735,7 +1735,12 @@ checkWifiStatus (void)
 					break; // Try scans again later
 				}
 				MY_ERROR_CHECK(esp_wifi_stop());
-				delay(100);
+				if (netifAp != NULL) {
+					esp_netif_destroy_default_wifi(netifAp);
+				}
+				if (netifSta != NULL) {
+					esp_netif_destroy_default_wifi(netifSta);
+				}
 				netifAp = esp_netif_create_default_wifi_ap();
 				netifSta = esp_netif_create_default_wifi_sta();
 				wifiSetupApSta(chan, bssid, netifAp, netifSta);
@@ -1743,6 +1748,9 @@ checkWifiStatus (void)
 				break;
 			}
 		} else {
+			if (netifSta != NULL) {
+				esp_netif_destroy_default_wifi(netifSta);
+			}
 			netifSta = esp_netif_create_default_wifi_sta();
 			wifiSetupSta(netifSta);
 		}
@@ -2102,7 +2110,7 @@ updateDisplayInfo()
 		dbgIdx = 1;
 #ifdef DEBUG_FREEMEM
 	} else if (dbgIdx < 2) {
-		snprintf(line4, sizeof(line4), "Mem: %u", freeMemory());
+		snprintf(line4, sizeof(line4), "Mem: %lu", freeMemory());
 		dbgIdx = 2;
 #endif // DEBUG_FREEMEM
 #ifdef DEBUG_WIFI
