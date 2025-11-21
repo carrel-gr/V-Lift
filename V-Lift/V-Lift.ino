@@ -44,7 +44,7 @@
 void setButtonLEDs(int freq = 0);
 
 // Device parameters
-char _version[VERSION_STR_LEN] = "v2.79";
+char _version[VERSION_STR_LEN] = "v2.80";
 char myUniqueId[17];
 char statusTopic[128];
 
@@ -470,8 +470,11 @@ configHandler(void)
 	Preferences preferences;
 	char mqttPort[8];
 
-	delete otaServer;
-	otaServer = NULL;
+	if (otaServer != NULL) {
+		otaServer->stop();
+		delete otaServer;
+		otaServer = NULL;
+	}
 	esp_wifi_stop();
 	delay(100);
 
@@ -1670,7 +1673,8 @@ checkWifiStatus (void)
 			udp.stop();
 			udpIsOn = false;
 		}
-		if (otaServer) {
+		if (otaServer != NULL) {
+			otaServer->stop();
 			delete otaServer;
 			otaServer = NULL;
 		}
@@ -1811,7 +1815,8 @@ checkWifiStatus (void)
 			}
 			udp.begin(privIP, PRIV_UDP_PORT);
 			udpIsOn = true;
-			if (otaServer) {
+			if (otaServer != NULL) {
+				otaServer->stop();
 				delete otaServer;
 			}
 			otaServer = new WebServer(privIP, 80);
