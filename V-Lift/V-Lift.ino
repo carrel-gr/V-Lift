@@ -44,7 +44,7 @@
 void setButtonLEDs(int freq = 0);
 
 // Device parameters
-char _version[VERSION_STR_LEN] = "v2.80";
+char _version[VERSION_STR_LEN] = "v2.81";
 char myUniqueId[17];
 char statusTopic[128];
 
@@ -57,6 +57,7 @@ volatile enum myWifiState wifiState = myWifiState::stopped;
 volatile bool wifiRestarted = false;
 #ifdef DEBUG_WIFI
 uint16_t wifiStoppedCnt = 0;
+uint16_t wifiConfigCnt = 0;
 volatile uint16_t wifiConnectedCnt = 0;
 uint16_t wifiGotIpCnt = 0;
 #endif // DEBUG_WIFI
@@ -89,6 +90,7 @@ WebServer *otaServer = NULL;
 
 NetworkUDP udp;
 #define UDP_BUF_SIZ 128
+bool udpIsOn = false;
 #ifdef DEBUG_UDP
 unsigned int udpPacketsSent = 0;
 unsigned int udpPacketsSentErrors = 0;
@@ -694,7 +696,8 @@ loop ()
 	setButtonLEDs();
 
 	if (myPodNum == 1) {
-		if (((wifiState == myWifiState::started) || (wifiState == myWifiState::gotIp)) &&
+		if (udpIsOn &&
+		    ((wifiState == myWifiState::started) || (wifiState == myWifiState::gotIp)) &&
 		    checkTimer(&lastRunPodData, pod2podDataInterval)) {
 			sendCommandsToRemotePods();
 			sendPodInfo();
@@ -709,7 +712,7 @@ loop ()
 			mqttStartupMode = false;
 		}
 	} else {
-		if ((wifiState == myWifiState::gotIp) && checkTimer(&lastRunPodData, pod2podDataInterval)) {
+		if (udpIsOn && (wifiState == myWifiState::gotIp) && checkTimer(&lastRunPodData, pod2podDataInterval)) {
 			sendPodInfo();
 			remoteButtons = buttonState::nothingPressed; // consumed by sendPodinfo()
 			pod2podDataInterval = POD2POD_DATA_INTERVAL_NORMAL;
@@ -1432,7 +1435,7 @@ static void wifiEventHandler(void *arg, esp_event_base_t eventBase,
 			break;
 		case WIFI_EVENT_STA_START:
 			if (wifiState == myWifiState::started) {
-				esp_wifi_connect();
+				MY_ERROR_CHECK(esp_wifi_connect());
 			}
 #if defined(DEBUG_OVER_SERIAL) && defined(DEBUG_WIFI)
 			Serial.println("Station WiFi started");
@@ -1559,9 +1562,11 @@ wifiSetupApSta(uint8_t chan, uint8_t *bssid, esp_netif_t *netifAp, esp_netif_t *
 		wifi_config_t *wifiStaConfig = (wifi_config_t *)calloc(1, sizeof(wifi_config_t));
 		strlcpy((char *)wifiStaConfig->sta.ssid, config.wifiSSID.c_str(), sizeof(wifiStaConfig->sta.ssid));
 		strlcpy((char *)wifiStaConfig->sta.password, config.wifiPass.c_str(), sizeof(wifiStaConfig->sta.password));
-		wifiStaConfig->sta.channel = chan;
-		wifiStaConfig->sta.bssid_set = true;
-		memcpy(wifiStaConfig->sta.bssid, bssid, sizeof(wifiStaConfig->sta.bssid));
+		if (chan) {
+			wifiStaConfig->sta.channel = chan;
+			wifiStaConfig->sta.bssid_set = true;
+			memcpy(wifiStaConfig->sta.bssid, bssid, sizeof(wifiStaConfig->sta.bssid));
+		}
 		wifiStaConfig->sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
 		MY_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, wifiStaConfig));
 		free(wifiStaConfig);
@@ -1643,7 +1648,6 @@ checkWifiStatus (void)
 	static esp_netif_t *netifSta = NULL, *netifAp = NULL;
 	static int scanTries = 0;
 	static int startedCnt = 0;
-	static bool udpIsOn = false;
 #ifdef WIFI_TEST_POWER
 	static uint8_t wifiPower = WIFI_POWER_8_5dBm;
 #endif // WIFI_TEST_POWER
@@ -1689,78 +1693,16 @@ checkWifiStatus (void)
 			netifAp = NULL;
 		}
 		if (myPodNum == 1) {
+			netifAp = esp_netif_create_default_wifi_ap();
+		}
+		netifSta = esp_netif_create_default_wifi_sta();
+		if (myPodNum == 1) {
 			MY_ERROR_CHECK(esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW_HT20));
 			MY_ERROR_CHECK(esp_wifi_set_protocol(WIFI_IF_AP, WIFI_PROTOCOL_11B|WIFI_PROTOCOL_11G|WIFI_PROTOCOL_11N|WIFI_PROTOCOL_11AX));
 		}
 		MY_ERROR_CHECK(esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT20));
 		MY_ERROR_CHECK(esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B|WIFI_PROTOCOL_11G|WIFI_PROTOCOL_11N|WIFI_PROTOCOL_11AX));
 		delay(100);
-#ifdef WIFI_TEST_POWER
-		if (myPodNum == 1) {
-			if (wifiPower == WIFI_POWER_8_5dBm) {
-				wifiPower = WIFI_POWER_13dBm;
-			} else if (wifiPower == WIFI_POWER_13dBm) {
-				wifiPower = WIFI_POWER_21dBm;
-			} else {
-				wifiPower = WIFI_POWER_8_5dBm;
-			}
-		} else {
-			wifiPower = WIFI_POWER_8_5dBm;
-		}
-#endif // WIFI_TEST_POWER
-		if (myPodNum == 1) {
-			MY_ERROR_CHECK(esp_wifi_start());
-#ifdef WIFI_TEST_POWER
-			MY_ERROR_CHECK(esp_wifi_set_max_tx_power(wifiPower));
-#endif // WIFI_TEST_POWER
-		}
-		wifiState = myWifiState::configuring;
-		lastWifiTry = 0; // No delay for fallthru below
-		scanTries = 0;
-		/* FALLTHRU */
-	case myWifiState::configuring:
-		if (myPodNum == 1) {
-			if (checkTimer(&lastWifiTry, INTERVAL_TEN_SECONDS)) {
-#if defined(DEBUG_OVER_SERIAL) && defined(DEBUG_WIFI)
-				Serial.println("Configuring WiFi");
-#endif // DEBUG_OVER_SERIAL && DEBUG_WIFI
-				uint8_t chan, bssid[6];
-				int goodScans = wifiDoScans(&chan, &bssid[0]);
-				scanTries++;
-				if (scanTries < 4) {
-					if (goodScans < 3) {
-						break; // Try scans again later
-					}
-				} else if (scanTries < 7) {
-					if (goodScans < 2) {
-						break; // Try scans again later
-					}
-				} else if (goodScans == 0) {
-					break; // Try scans again later
-				}
-				MY_ERROR_CHECK(esp_wifi_stop());
-				if (netifAp != NULL) {
-					esp_netif_destroy_default_wifi(netifAp);
-				}
-				if (netifSta != NULL) {
-					esp_netif_destroy_default_wifi(netifSta);
-				}
-				netifAp = esp_netif_create_default_wifi_ap();
-				netifSta = esp_netif_create_default_wifi_sta();
-				wifiSetupApSta(chan, bssid, netifAp, netifSta);
-			} else {
-				break;
-			}
-		} else {
-			if (netifSta != NULL) {
-				esp_netif_destroy_default_wifi(netifSta);
-			}
-			netifSta = esp_netif_create_default_wifi_sta();
-			wifiSetupSta(netifSta);
-		}
-		startedCnt = 0;
-		wifiState = myWifiState::started;
-		lastWifiTry = 0;  // No delay next time in this loop
 		MY_ERROR_CHECK(esp_wifi_start());
 #ifdef WIFI_TEST_POWER
 		MY_ERROR_CHECK(esp_wifi_set_max_tx_power(wifiPower));
@@ -1768,20 +1710,91 @@ checkWifiStatus (void)
 #ifdef WIFI_TEST_INACTIVE_TIME
 		esp_wifi_set_inactive_time(WIFI_IF_STA, WIFI_TEST_INACTIVE_TIME);
 #endif // WIFI_TEST_INACTIVE_TIME
+		wifiState = myWifiState::configuring;
+		lastWifiTry = 0; // No delay for fallthru below
+		scanTries = -1;
+		/* FALLTHRU */
+	case myWifiState::configuring:
+		if (myPodNum == 1) {
+			if (checkTimer(&lastWifiTry, INTERVAL_TEN_SECONDS)) {
+#ifdef DEBUG_WIFI
+				wifiConfigCnt++;
+#endif // DEBUG_WIFI
+#if defined(DEBUG_OVER_SERIAL) && defined(DEBUG_WIFI)
+				Serial.println("Configuring WiFi");
+#endif // DEBUG_OVER_SERIAL && DEBUG_WIFI
+				uint8_t chan, bssid[6];
+				int goodScans = wifiDoScans(&chan, &bssid[0]);
+				scanTries++;
+				if (scanTries < 2) {
+					if (goodScans < 3) {
+						break; // Try scans again later
+					}
+				} else if (scanTries < 3) {
+					if (goodScans < 2) {
+						break; // Try scans again later
+					}
+				} else if (scanTries < 4) {
+					if (goodScans < 1) {
+						break; // Try scans again later
+					}
+				}
+				wifiSetupApSta(chan, bssid, netifAp, netifSta);
+			} else {
+				break;
+			}
+		} else {
+#ifdef DEBUG_WIFI
+			wifiConfigCnt++;
+#endif // DEBUG_WIFI
+			wifiSetupSta(netifSta);
+		}
+		MY_ERROR_CHECK(esp_wifi_connect());
+		startedCnt = 0; // So reconn will not fire immediately
+		checkTimer(&lastWifiTry, 0); // Full delay
+		wifiState = myWifiState::started;
 		break;
 	case myWifiState::disconnected:
-		startedCnt = - 1; // So reconn will fire immediately
+		MY_ERROR_CHECK(esp_wifi_connect());
+		startedCnt = 0; // So reconn will not fire immediately
+		checkTimer(&lastWifiTry, 0); // Full delay
 		wifiState = myWifiState::started;
-		/* FALLTHRU */
+		break;
 	case myWifiState::started:
 		// Should normally leave this state because eventHandler calls connect()
+		if (myPodNum == 1) {
+			IPAddress privIP(192, 168, PRIV_WIFI_SUBNET, myPodNum);
+			if (!udpIsOn) {
+				udp.begin(privIP, PRIV_UDP_PORT);
+				udpIsOn = true;
+			}
+			if (otaServer == NULL) {
+				otaServer = new WebServer(privIP, 80);
+				if (otaServer != NULL) {
+					ElegantOTA.begin(otaServer);    // Start ElegantOTA
+					otaServer->begin();
+				}
+			}
+		}
 		if (checkTimer(&lastWifiTry, INTERVAL_TEN_SECONDS)) {
 			startedCnt++;
-			if (startedCnt >= restartTime) {
+			if ((myPodNum == 1) && (startedCnt >= restartTime)) {
 #if defined(DEBUG_OVER_SERIAL) && defined(DEBUG_WIFI)
 				Serial.println("Restarting WiFi");
 #endif // DEBUG_OVER_SERIAL && DEBUG_WIFI
-				wifiState = myWifiState::stopped;
+#ifdef WIFI_TEST_POWER
+				if (wifiPower == WIFI_POWER_8_5dBm) {
+					wifiPower = WIFI_POWER_13dBm;
+				} else if (wifiPower == WIFI_POWER_13dBm) {
+					wifiPower = WIFI_POWER_21dBm;
+				} else {
+					wifiPower = WIFI_POWER_8_5dBm;
+				}
+				MY_ERROR_CHECK(esp_wifi_set_max_tx_power(wifiPower));
+#endif // WIFI_TEST_POWER
+				MY_ERROR_CHECK(esp_wifi_disconnect());
+				scanTries = -1;
+				wifiState = myWifiState::configuring;
 			} else if ((startedCnt % reconnFreq) == 0) {
 #if defined(DEBUG_OVER_SERIAL) && defined(DEBUG_WIFI)
 				Serial.println("Reconnecting WiFi");
@@ -1808,20 +1821,17 @@ checkWifiStatus (void)
 				}
 			}
 
-			if (udpIsOn) {
-				udp.clear();
-				udp.stop();
-				delay(50);
+			if (!udpIsOn) {
+				udp.begin(privIP, PRIV_UDP_PORT);
+				udpIsOn = true;
 			}
-			udp.begin(privIP, PRIV_UDP_PORT);
-			udpIsOn = true;
-			if (otaServer != NULL) {
-				otaServer->stop();
-				delete otaServer;
+			if (otaServer == NULL) {
+				otaServer = new WebServer(privIP, 80);
+				if (otaServer != NULL) {
+					ElegantOTA.begin(otaServer);    // Start ElegantOTA
+					otaServer->begin();
+				}
 			}
-			otaServer = new WebServer(privIP, 80);
-			ElegantOTA.begin(otaServer);    // Start ElegantOTA
-			otaServer->begin();
 
 			wifiRestarted = true;
 #ifdef DEBUG_OVER_SERIAL
@@ -2120,7 +2130,7 @@ updateDisplayInfo()
 #endif // DEBUG_FREEMEM
 #ifdef DEBUG_WIFI
 	} else if (dbgIdx < 3) {
-		snprintf(line4, sizeof(line4), "WiFi recon: %hu/%hu/%hu", wifiStoppedCnt, wifiConnectedCnt, wifiGotIpCnt);
+		snprintf(line4, sizeof(line4), "WiFi recon: %hu/%hu/%hu", wifiConfigCnt, wifiConnectedCnt, wifiGotIpCnt);
 		dbgIdx = 3;
 	} else if (dbgIdx < 4) {
 		int8_t power;
@@ -2463,7 +2473,7 @@ sendStatus(unsigned long *lastRun)
 		char chanInfo[12];
 		getWifiChanInfo(&chanInfo[0], sizeof(chanInfo));
 		esp_wifi_get_max_tx_power(&power);
-		snprintf(moreState, sizeof(moreState), ", \"wifi\": \"%s %0.01fdBm %hu/%hu/%hu\"", chanInfo, (float)power / 4.0f, wifiStoppedCnt, wifiConnectedCnt, wifiGotIpCnt);
+		snprintf(moreState, sizeof(moreState), ", \"wifi\": \"%s %0.01fdBm %hu/%hu/%hu\"", chanInfo, (float)power / 4.0f, wifiConfigCnt, wifiConnectedCnt, wifiGotIpCnt);
 		strlcat(stateAddition, moreState, sizeof(stateAddition));
 	}
 #endif // DEBUG_WIFI
@@ -2900,8 +2910,7 @@ mqttCallback(char *topic, char *message, int retain, int qos, bool dup)
 		strlcpy(mqttIncomingPayload, (char *)message, length + 1);
 	}
 #ifdef DEBUG_OVER_SERIAL
-	Serial.printf("Payload: %d\n", length);
-	Serial.println(mqttIncomingPayload);
+	Serial.printf("Payload: %d \"%s\"\n", length, mqttIncomingPayload);
 #endif // DEBUG_OVER_SERIAL
 
 	// Special case for Home Assistant itself
