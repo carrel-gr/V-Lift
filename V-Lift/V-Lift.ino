@@ -44,7 +44,7 @@
 void setButtonLEDs(int freq = 0);
 
 // Device parameters
-char _version[VERSION_STR_LEN] = "v2.81";
+char _version[VERSION_STR_LEN] = "v2.82";
 char myUniqueId[17];
 char statusTopic[128];
 
@@ -67,7 +67,7 @@ const char* rootCA = ROOT_CA;
 #endif // USE_SSL
 
 // MQTT parameters
-PsychicMqttClient mqttClient;
+PsychicMqttClient *mqttClient = NULL;
 typedef struct publish {
 	char topic[128];
 	char payload[MAX_MQTT_BUFFER_SIZE];
@@ -82,7 +82,7 @@ uint32_t mqttConnects = 0;
 uint32_t mqttPublishSuccess = 0;
 uint32_t mqttPublishFail = 0;
 #endif // DEBUG_MQTT
-volatile bool mqttStartupMode = true;
+volatile bool mqttJustStarted = true;
 volatile bool mqttCallbackRcvd = false;
 
 // OTA setup
@@ -617,8 +617,8 @@ loop ()
 
 	if (myPodNum == 1) {
 		// make sure mqtt is still connected
-		if (wifiIsOn) {
-			mqttIsOn = mqttClient.connected();
+		if (wifiIsOn && mqttClient) {
+			mqttIsOn = mqttClient->connected();
 		} else {
 			mqttIsOn = false;
 		}
@@ -706,10 +706,10 @@ loop ()
 
 		if ((wifiState == myWifiState::gotIp) && mqttIsOn) {
 			sendStatus(&lastRunStatus);	// Send status/keepalive
-			sendHaData(&lastRunSendHaData, mqttStartupMode);
-			sendData(&lastRunSendData, mqttUrgent || mqttStartupMode);
+			sendHaData(&lastRunSendHaData, mqttJustStarted);
+			sendData(&lastRunSendData, mqttUrgent || mqttJustStarted);
 			mqttUrgent = false;
-			mqttStartupMode = false;
+			mqttJustStarted = false;
 		}
 	} else {
 		if (udpIsOn && (wifiState == myWifiState::gotIp) && checkTimer(&lastRunPodData, pod2podDataInterval)) {
@@ -1755,6 +1755,11 @@ checkWifiStatus (void)
 		wifiState = myWifiState::started;
 		break;
 	case myWifiState::disconnected:
+		if ((myPodNum == 1) && mqttClient) {
+			mqttClient->disconnect();
+			delete mqttClient;
+			mqttClient = NULL;
+		}
 		MY_ERROR_CHECK(esp_wifi_connect());
 		startedCnt = 0; // So reconn will not fire immediately
 		checkTimer(&lastWifiTry, 0); // Full delay
@@ -1814,9 +1819,7 @@ checkWifiStatus (void)
 			wifiGotIpCnt++;
 #endif // DEBUG_WIFI
 			if (myPodNum == 1) {
-				static boolean doneOnce = false;
-				if (!doneOnce) {
-					doneOnce = true;
+				if (mqttClient == NULL) {
 					initMqtt();
 				}
 			}
@@ -1938,13 +1941,14 @@ updateOLED(bool justStatus, const char* line2, const char* line3, const char* li
 
 	// There's 20 characters we can play with, width wise.
 	{
-		char wifiStatus, mqttStatus;
+		char wifiStatus, mqttStatus, otaStatus;
 
 		wifiStatus = mqttStatus = ' ';
 		wifiStatus = wifiState == myWifiState::gotIp ? 'W' : ' ';
-		mqttStatus = mqttClient.connected() ? 'M' : ' ';
-		snprintf(line1, sizeof(line1), "Pod%d %c%c%c         %3d",
-			 myPodNum, _oledOperatingIndicator, wifiStatus, mqttStatus, rssi);
+		mqttStatus = mqttClient && mqttClient->connected() ? 'M' : ' ';
+		otaStatus = otaServer != NULL ? 'O' : ' ';
+		snprintf(line1, sizeof(line1), "Pod%d %c%c%c%c        %3d",
+			 myPodNum, _oledOperatingIndicator, wifiStatus, mqttStatus, otaStatus, rssi);
 	}
 	_display.println(line1);
 	printWifiBars(rssi);
@@ -2207,12 +2211,16 @@ initMqtt(void)
 		server += ":";
 		server += config.mqttPort;
 	}
-	mqttClient.setServer(server.c_str());
-	mqttClient.setCredentials(config.mqttUser.c_str(), config.mqttPass.c_str());
-	mqttClient.setClientId(myUniqueId);
-	mqttClient.setBufferSize(MAX_MQTT_BUFFER_SIZE);
+	mqttClient = new PsychicMqttClient();
+	if (mqttClient == NULL) {
+		return;
+	}
+	mqttClient->setServer(server.c_str());
+	mqttClient->setCredentials(config.mqttUser.c_str(), config.mqttPass.c_str());
+	mqttClient->setClientId(myUniqueId);
+	mqttClient->setBufferSize(MAX_MQTT_BUFFER_SIZE);
 #ifdef USE_SSL
-	mqttClient.setCACert(rootCA);
+	mqttClient->setCACert(rootCA);
 #endif // USE_SSL
 	lwt = "{ \"systemStatus\": \"offline\"";
 	for (int podNum = 1; podNum <= NUM_PODS; podNum++) {
@@ -2221,20 +2229,20 @@ initMqtt(void)
 		lwt += "Status\": \"unavailable\"";
 	}
 	lwt += " }";
-	mqttClient.setWill(statusTopic, 1, true, lwt.c_str());
-	mqttClient.setCleanSession(true);
+	mqttClient->setWill(statusTopic, 1, true, lwt.c_str());
+	mqttClient->setCleanSession(true);
 	{
-		esp_mqtt_client_config_t *mqttCfg = mqttClient.getMqttConfig();
+		esp_mqtt_client_config_t *mqttCfg = mqttClient->getMqttConfig();
 		mqttCfg->network.timeout_ms = 3000; // 3s (default is 10s)
 	}
 
-	mqttClient.onConnect(onMqttConnect);
-	mqttClient.onPublish(onMqttPublish);
+	mqttClient->onConnect(onMqttConnect);
+	mqttClient->onPublish(onMqttPublish);
 	// And any messages we are subscribed to will be pushed to the mqttCallback function for processing
-	mqttClient.onMessage(mqttCallback);
+	mqttClient->onMessage(mqttCallback);
 
 	// Connect to MQTT
-	mqttClient.connect();
+	mqttClient->connect();
 }
 
 void
@@ -2265,7 +2273,7 @@ onMqttConnect(bool sessionPresent)
 
 	// Special case for Home Assistant
 	subscriptionDef = MQTT_SUB_HOMEASSISTANT;
-	mqttClient.subscribe(subscriptionDef.c_str(), MQTT_SUBSCRIBE_QOS);
+	mqttClient->subscribe(subscriptionDef.c_str(), MQTT_SUBSCRIBE_QOS);
 #ifdef DEBUG_OVER_SERIAL
 	Serial.println("Subscribed to " + subscriptionDef);
 #endif // DEBUG_OVER_SERIAL
@@ -2278,7 +2286,7 @@ onMqttConnect(bool sessionPresent)
 			subscriptionDef += "/";
 			subscriptionDef += _mqttSysEntities[i].mqttName;
 			subscriptionDef += "/command";
-			mqttClient.subscribe(subscriptionDef.c_str(), MQTT_SUBSCRIBE_QOS);
+			mqttClient->subscribe(subscriptionDef.c_str(), MQTT_SUBSCRIBE_QOS);
 #ifdef DEBUG_OVER_SERIAL
 			Serial.println("Subscribed to " + subscriptionDef);
 #endif // DEBUG_OVER_SERIAL
@@ -2286,8 +2294,8 @@ onMqttConnect(bool sessionPresent)
 	}
 
 	// Once we set up the first time, any reconnects should be persistent sessions
-	mqttClient.setCleanSession(false);
-	mqttStartupMode = true;
+	mqttClient->setCleanSession(false);
+	mqttJustStarted = true;
 }
 
 mqttState *
@@ -2775,7 +2783,7 @@ sendData(unsigned long *lastRun, bool urgent)
 }
 
 void
-sendHaData(unsigned long *lastRun, bool startupMode)
+sendHaData(unsigned long *lastRun, bool justStarted)
 {
 	static int nextToSend = 0;
 	static unsigned long haDataInterval = HA_DATA_INTERVAL_INITIAL;
@@ -2784,7 +2792,7 @@ sendHaData(unsigned long *lastRun, bool startupMode)
 	int numPodEntities = sizeof(_mqttPodEntities) / sizeof(struct mqttState);
 	int totalEntities = numSysEntities + (numPodEntities * NUM_PODS);
 
-	if (startupMode) {
+	if (justStarted) {
 		// Will send once immediately. Then again after the "initial" interval.  Then "normal"
 		nextToSend = 0;
 		haDataInterval = HA_DATA_INTERVAL_INITIAL;
@@ -3027,9 +3035,9 @@ sendMqtt(publishEntry_t *publish, bool retain)
 	bool ret;
 	int packetId;
 
-	if (wifiState == myWifiState::gotIp) {
+	if (mqttClient && (wifiState == myWifiState::gotIp)) {
 		// Attempt a send
-		packetId = mqttClient.publish(publish->topic, MQTT_PUBLISH_QOS, retain, publish->payload, strlen(publish->payload), true);
+		packetId = mqttClient->publish(publish->topic, MQTT_PUBLISH_QOS, retain, publish->payload, strlen(publish->payload), true);
 	} else {
 		packetId = -111;
 	}
