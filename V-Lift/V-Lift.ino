@@ -5,12 +5,20 @@
  */
 
 // DAVE -  todo --
-// make mqtt disconnect/reconnect
-// restart wifi if gotIp and mqtt is disconnected for too long
+// Fix hang
+//	- stopping reads on A0 doesn't help.
+//	- detaching charger and just running from battery doesn't help
+// add a watchdog.
+//
 // pressing button a 2nd time doesn't stop.
 // ADD duty-cycle
 // handle top sensor going wet w/o bottom
 // Add back web config
+
+// Track the version of the eps32 board package that is used
+// V-Lift 2.84 - esp32 3.3.4
+// V-Lift 2.82 - esp32 3.3.3
+// untracked before this
 
 #define WIFI_TEST_POWER
 
@@ -23,6 +31,7 @@
 #include "Definitions.h"
 #include <Arduino.h>
 #include <driver/rtc_io.h>
+#include <esp_mac.h>
 #include <esp_netif.h>
 #include <esp_wifi.h>
 #include <NetworkUdp.h>
@@ -44,7 +53,7 @@
 void setButtonLEDs(int freq = 0);
 
 // Device parameters
-char _version[VERSION_STR_LEN] = "v2.82";
+char _version[VERSION_STR_LEN] = "v2.84";
 char myUniqueId[17];
 char statusTopic[128];
 
@@ -247,8 +256,6 @@ void setup()
 		myPod = &pods[config.podNumber];
 	}
 
-	MY_ERROR_CHECK(esp_wifi_stop());
-	delay(100);
 	MY_ERROR_CHECK(esp_netif_init());
 	MY_ERROR_CHECK(esp_event_loop_create_default());
 	/* Register Event handler */
@@ -264,8 +271,7 @@ void setup()
 	// Set WiFi mode and our unique identity.
 	if (myPodNum == 1) {
 		uint8_t mac[6];
-		MY_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
-		MY_ERROR_CHECK(esp_wifi_get_mac(WIFI_IF_STA, mac));
+		esp_base_mac_addr_get(mac);
 		snprintf(myUniqueId, sizeof(myUniqueId), DEVICE_NAME "-%0X%02X%02X", mac[3] & 0xf, mac[4], mac[5]);
 		snprintf(statusTopic, sizeof(statusTopic), DEVICE_NAME "/%s/status", myUniqueId);
 
@@ -280,7 +286,6 @@ void setup()
 			ESP.restart();
 		}
 	} else {
-		MY_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
 		snprintf(myUniqueId, sizeof(myUniqueId), DEVICE_NAME "-pod%d", myPodNum);
 	}
 #ifdef USE_DISPLAY
@@ -1581,9 +1586,6 @@ wifiSetupSta(esp_netif_t *netifSta)
 	IP4_ADDR(&privIpInfo.gw, 192, 168, PRIV_WIFI_SUBNET, 1);
 	IP4_ADDR(&privIpInfo.netmask, 255, 255, 255, 0);
 
-	// Set up in Station Mode - Will be connecting to #1's access point
-	MY_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-
 	esp_netif_dhcpc_stop(netifSta);
 	esp_netif_set_ip_info(netifSta, &privIpInfo);
 	esp_netif_set_hostname(netifSta, myUniqueId);
@@ -1693,7 +1695,10 @@ checkWifiStatus (void)
 			netifAp = NULL;
 		}
 		if (myPodNum == 1) {
+			MY_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
 			netifAp = esp_netif_create_default_wifi_ap();
+		} else {
+			MY_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
 		}
 		netifSta = esp_netif_create_default_wifi_sta();
 		if (myPodNum == 1) {

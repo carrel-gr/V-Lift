@@ -91,7 +91,7 @@ Author:		David Carrel
 #define MAX_MQTT_BUFFER_SIZE 1024
 
 #define DEBUG_OVER_SERIAL	// Enable debugging msgs over serial port
-#define DEBUG_FREEMEM		// Enable extra debug for memory usage
+//#define DEBUG_FREEMEM		// Enable extra debug for memory usage
 #define DEBUG_WIFI		// Enable extra debug for WiFi
 #define DEBUG_MQTT		// Enable extra debug MQTT
 //#define DEBUG_UPTIME
