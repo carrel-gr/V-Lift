@@ -50,10 +50,16 @@
 #include <Adafruit_SSD1306.h>
 #endif // USE_DISPLAY
 
+#define MY_ESP_ARDUINO_VERSION_MINOR 3
+#define MY_ESP_ARDUINO_VERSION_PATCH 5  // ESP board package 3.3.5
+#if (ESP_ARDUINO_VERSION_MINOR != MY_ESP_ARDUINO_VERSION_MINOR) || ( ESP_ARDUINO_VERSION_PATCH != MY_ESP_ARDUINO_VERSION_PATCH)
+#error Wrong ESP version.
+#endif
+
 void setButtonLEDs(int freq = 0);
 
 // Device parameters
-char _version[VERSION_STR_LEN] = "v2.84";
+char _version[VERSION_STR_LEN] = "v2.85";
 char myUniqueId[17];
 char statusTopic[128];
 
@@ -171,7 +177,7 @@ static struct mqttState _mqttPodEntities[] =
 #define DATA_INTERVAL_URGENT INTERVAL_FIVE_SECONDS
 #define DATA_INTERVAL_NORMAL INTERVAL_ONE_MINUTE
 #define HA_DATA_INTERVAL_INITIAL (INTERVAL_TEN_SECONDS * 2)
-#define HA_DATA_INTERVAL_NORMAL INTERVAL_FIVE_MINUTE
+#define HA_DATA_INTERVAL_NORMAL INTERVAL_ONE_HOUR
 #define POD2POD_DATA_INTERVAL_URGENT INTERVAL_ONE_SECOND
 #define POD2POD_DATA_INTERVAL_NORMAL INTERVAL_FIVE_SECONDS
 #define RELAY_MAX_FREQ INTERVAL_FIVE_SECONDS
@@ -1948,7 +1954,6 @@ updateOLED(bool justStatus, const char* line2, const char* line3, const char* li
 	{
 		char wifiStatus, mqttStatus, otaStatus;
 
-		wifiStatus = mqttStatus = ' ';
 		wifiStatus = wifiState == myWifiState::gotIp ? 'W' : ' ';
 		mqttStatus = mqttClient && mqttClient->connected() ? 'M' : ' ';
 		otaStatus = otaServer != NULL ? 'O' : ' ';
@@ -2235,6 +2240,7 @@ initMqtt(void)
 	}
 	lwt += " }";
 	mqttClient->setWill(statusTopic, 1, true, lwt.c_str());
+	mqttClient->setKeepAlive(300);
 	mqttClient->setCleanSession(true);
 	{
 		esp_mqtt_client_config_t *mqttCfg = mqttClient->getMqttConfig();
@@ -2408,10 +2414,6 @@ readEntity(mqttState *singleEntity, char *value, int podNum)
 		sprintf(value, "%lu", wifiGotIpCnt);
 		break;
 #endif // DEBUG_WIFI
-	}
-
-	if ((podNum != 0) && !POD_DATA_IS_FRESH(podNum)) {
-		strcpy(value, "unavailable");
 	}
 }
 
